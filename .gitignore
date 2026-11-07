@@ -55,33 +55,33 @@ credentials/
 *.sqlite
 *.sqlite3
 *.sql.bak
-data/
-db/
-database/
-databases/
-backups/
+/data/
+/db/
+/database/
+/databases/
+/backups/
 *.bak
 *.dump
 
 # -----------------------------------------------------------------------------
 # Uploaded user files and originals (never commit user content)
 # -----------------------------------------------------------------------------
-uploads/
-inbox/
-user_files/
-originals/
-media/
-files/
-storage/
+/uploads/
+/inbox/
+/user_files/
+/originals/
+/media/
+/files/
+/storage/
 *.tmp
 *.temp
 
 # -----------------------------------------------------------------------------
 # AI model weights and local model caches
 # -----------------------------------------------------------------------------
-models/
-weights/
-checkpoints/
+/models/
+/weights/
+/checkpoints/
 *.pt
 *.pth
 *.onnx
@@ -92,12 +92,14 @@ checkpoints/
 .cache/huggingface/
 *.h5
 *.hdf5
+!backend/models/
+!backend/storage/
 
 # -----------------------------------------------------------------------------
 # Temporary files
 # -----------------------------------------------------------------------------
-tmp/
-temp/
+/tmp/
+/temp/
 *.tmp
 *.temp
 *.swp
@@ -107,7 +109,7 @@ temp/
 # -----------------------------------------------------------------------------
 # Logs (may contain private information)
 # -----------------------------------------------------------------------------
-logs/
+/logs/
 *.log
 *.log.*
 activity.log

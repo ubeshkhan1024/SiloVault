@@ -35,10 +35,17 @@ function renderFileList(files, container) {
     files.forEach((file) => {
         const row = document.createElement("div");
         row.className = "file-row";
-        row.innerHTML = `
-            <div class="file-name">${file.original_name ?? file.file_id}</div>
-            <div class="file-meta">${file.category ?? "Uncategorized"}</div>
-        `;
+
+        const nameDiv = document.createElement("div");
+        nameDiv.className = "file-name";
+        nameDiv.textContent = file.original_name ?? file.file_id;
+
+        const metaDiv = document.createElement("div");
+        metaDiv.className = "file-meta";
+        metaDiv.textContent = file.category ?? "Uncategorized";
+
+        row.appendChild(nameDiv);
+        row.appendChild(metaDiv);
         container.appendChild(row);
     });
 }

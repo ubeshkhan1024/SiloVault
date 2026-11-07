@@ -57,11 +57,22 @@ function displayLocalQueue(files, container) {
     files.forEach((file) => {
         const entry = document.createElement("div");
         entry.className = "queue-entry";
-        entry.innerHTML = `
-            <span class="file-name">${file.name}</span>
-            <span class="file-size">${formatBytes(file.size)}</span>
-            <span class="queue-status pending">Queued (local only)</span>
-        `;
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "file-name";
+        nameSpan.textContent = file.name;
+
+        const sizeSpan = document.createElement("span");
+        sizeSpan.className = "file-size";
+        sizeSpan.textContent = formatBytes(file.size);
+
+        const statusSpan = document.createElement("span");
+        statusSpan.className = "queue-status pending";
+        statusSpan.textContent = "Queued (local only)";
+
+        entry.appendChild(nameSpan);
+        entry.appendChild(sizeSpan);
+        entry.appendChild(statusSpan);
         container.appendChild(entry);
     });
 }

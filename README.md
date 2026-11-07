@@ -59,7 +59,7 @@ SiloVault/
 │   ├── manifest.json    # PWA manifest
 │   └── service-worker.js # Offline shell caching
 ├── docs/                # Project documentation (6 files)
-├── tests/               # Pytest suite (5 tests)
+├── tests/               # Pytest suite (6 tests)
 ├── data/                # Local data directory (gitignored)
 ├── uploads/             # Upload staging (gitignored)
 ├── models/              # Model weights (gitignored)
@@ -109,7 +109,7 @@ npx serve frontend
 **Testing:**
 ```bash
 pytest tests/
-# 5 tests pass against placeholder endpoints
+# 6 tests pass against placeholder endpoints
 ```
 
 To contribute:

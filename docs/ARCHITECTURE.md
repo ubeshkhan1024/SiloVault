@@ -16,7 +16,7 @@ To ensure clarity across all documentation, architecture elements are categorize
 
 | Status | Definition | Components |
 |---|---|---|
-| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton with 14 registered routes, PWA frontend shell (6 views, service worker), test scaffolding (5 tests). All non-health endpoints are placeholder stubs. |
+| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton with 14 registered routes, PWA frontend shell (6 views, service worker), test scaffolding (6 tests). All non-health endpoints are placeholder stubs. |
 | **Planned** | Approved core requirement, design in progress | Primary Local Node, Mobile Inbox intake, AI Pipeline, Reversible storage rules |
 | **Proposed** | Architectural choice under evaluation | FastAPI, SQLite, Ollama, Supabase for Cloud Control Plane, Google Drive API |
 | **Future Possibility** | Concept for potential future extension | Additional cloud storage providers (S3/OneDrive), multi-device sync, local vector DB |

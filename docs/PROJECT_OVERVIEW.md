@@ -87,6 +87,6 @@ development rules (see [../AGENTS.md](../AGENTS.md)), configuration
 
 - **FastAPI backend** with 14 registered API routes under `/api/v1/` (health, system status, files, uploads, sync, AI processing, approvals, activity). All endpoints except `GET /api/v1/health` return placeholder responses.
 - **PWA frontend shell** with 6 navigable views (Dashboard, Files, Uploads, Sync, Activity, Settings), service worker for offline caching, and ES module architecture.
-- **Test scaffolding** with 5 passing tests against placeholder endpoints.
+- **Test scaffolding** with 6 passing tests against placeholder endpoints.
 
 No business logic, database models, cloud integrations, or AI processing is implemented yet. The next steps are defined in [ROADMAP.md](ROADMAP.md).
