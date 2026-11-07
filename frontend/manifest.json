@@ -1,0 +1,10 @@
+{
+  "name": "SiloVault",
+  "short_name": "SiloVault",
+  "description": "Privacy-focused, AI-powered cloud file management system.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115"
+}

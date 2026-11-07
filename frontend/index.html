@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SiloVault</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="manifest" href="manifest.json">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-mark">SV</span>
+                    <span class="logo-text">SiloVault</span>
+                </div>
+            </div>
+            <nav class="nav-menu">
+                <a href="#dashboard" class="nav-item active" data-view="dashboard">
+                    <span class="nav-icon">◈</span> Overview
+                </a>
+                <a href="#files" class="nav-item" data-view="files">
+                    <span class="nav-icon">◆</span> Files
+                </a>
+                <a href="#uploads" class="nav-item" data-view="uploads">
+                    <span class="nav-icon">↑</span> Uploads
+                </a>
+                <a href="#sync" class="nav-item" data-view="sync">
+                    <span class="nav-icon">⇄</span> Sync Status
+                </a>
+                <a href="#activity" class="nav-item" data-view="activity">
+                    <span class="nav-icon">▦</span> Activity
+                </a>
+                <a href="#settings" class="nav-item" data-view="settings">
+                    <span class="nav-icon">⚙</span> Settings
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <span class="status-dot offline"></span>
+                <span class="status-text">Local Node Offline</span>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="topbar">
+                <div class="search-box">
+                    <input type="text" placeholder="Search files, tags, or categories..." id="search-input">
+                </div>
+                <div class="topbar-actions">
+                    <button class="btn-primary" id="upload-btn">+ Upload</button>
+                    <div class="user-avatar" title="Local User">U</div>
+                </div>
+            </header>
+
+            <section class="view-container" id="view-container">
+                <!-- Dashboard Overview -->
+                <div class="view active" id="view-dashboard">
+                    <h1 class="view-title">Overview</h1>
+                    <p class="view-subtitle">Your private, local-AI powered file manager.</p>
+
+                    <div class="stat-grid">
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-files">0</div>
+                            <div class="stat-label">Indexed Files</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-pending">0</div>
+                            <div class="stat-label">Pending Approval</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-sync">--</div>
+                            <div class="stat-label">Last Sync</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-ai">--</div>
+                            <div class="stat-label">AI Engine</div>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2>Recent Activity</h2>
+                        </div>
+                        <div class="panel-body" id="recent-activity">
+                            <p class="placeholder-text">No recent activity. Upload files to begin.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Files View -->
+                <div class="view" id="view-files">
+                    <h1 class="view-title">Files</h1>
+                    <p class="view-subtitle">Browse and manage your indexed files.</p>
+                    <div class="panel">
+                        <div class="panel-body" id="file-list">
+                            <p class="placeholder-text">File indexing is not yet initialized.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Uploads View -->
+                <div class="view" id="view-uploads">
+                    <h1 class="view-title">Uploads</h1>
+                    <p class="view-subtitle">Upload photos, videos, and documents.</p>
+                    <div class="upload-zone" id="upload-zone">
+                        <div class="upload-icon">↑</div>
+                        <p>Drag and drop files here</p>
+                        <p class="upload-hint">or click to select files from your device</p>
+                        <input type="file" id="file-input" multiple hidden>
+                    </div>
+                    <div class="upload-queue" id="upload-queue">
+                        <p class="placeholder-text">No active uploads.</p>
+                    </div>
+                </div>
+
+                <!-- Sync View -->
+                <div class="view" id="view-sync">
+                    <h1 class="view-title">Synchronization</h1>
+                    <p class="view-subtitle">Monitor cloud inbox sync and processing states.</p>
+                    <div class="panel">
+                        <div class="panel-body" id="sync-status">
+                            <p class="placeholder-text">Sync service has not started.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Activity View -->
+                <div class="view" id="view-activity">
+                    <h1 class="view-title">Activity History</h1>
+                    <p class="view-subtitle">Review file operations and audit logs.</p>
+                    <div class="panel">
+                        <div class="panel-body" id="activity-log">
+                            <p class="placeholder-text">No activity records yet.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Settings View -->
+                <div class="view" id="view-settings">
+                    <h1 class="view-title">Settings</h1>
+                    <p class="view-subtitle">Configure local backend and cloud integrations.</p>
+                    <div class="panel">
+                        <div class="panel-body">
+                            <p class="placeholder-text">Settings panel is not yet implemented.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>

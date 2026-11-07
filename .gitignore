@@ -1,0 +1,124 @@
+# =============================================================================
+# SiloVault .gitignore
+#
+# Principle: nothing sensitive, generated, or user-owned is ever committed.
+# Secrets, local databases, uploaded originals, model weights, temp files, and
+# private logs stay out of Git.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python virtual environments
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# -----------------------------------------------------------------------------
+# Python cache and build artifacts
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# -----------------------------------------------------------------------------
+# Environment files and secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# -----------------------------------------------------------------------------
+# Local databases and database backups
+# -----------------------------------------------------------------------------
+*.db
+*.db3
+*.sqlite
+*.sqlite3
+*.sql.bak
+data/
+db/
+database/
+databases/
+backups/
+*.bak
+*.dump
+
+# -----------------------------------------------------------------------------
+# Uploaded user files and originals (never commit user content)
+# -----------------------------------------------------------------------------
+uploads/
+inbox/
+user_files/
+originals/
+media/
+files/
+storage/
+*.tmp
+*.temp
+
+# -----------------------------------------------------------------------------
+# AI model weights and local model caches
+# -----------------------------------------------------------------------------
+models/
+weights/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.safetensors
+*.bin
+*.tflite
+.cache/huggingface/
+*.h5
+*.hdf5
+
+# -----------------------------------------------------------------------------
+# Temporary files
+# -----------------------------------------------------------------------------
+tmp/
+temp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# Logs (may contain private information)
+# -----------------------------------------------------------------------------
+logs/
+*.log
+*.log.*
+activity.log
+audit.log
+
+# -----------------------------------------------------------------------------
+# OS and editor noise
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.code-workspace
