@@ -44,8 +44,8 @@ htmlcov/
 *.key
 *.p12
 *.pfx
-secrets/
-credentials/
+/secrets/
+/credentials/
 
 # -----------------------------------------------------------------------------
 # Local databases and database backups

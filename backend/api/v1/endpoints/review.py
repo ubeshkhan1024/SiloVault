@@ -23,13 +23,15 @@ async def list_pending_approvals():
 
 
 @router.post("/{approval_id}/action")
-async def submit_approval_action(approval_id: str):
+async def submit_approval_action(approval_id: str, action_data: dict = None):
     """Submit a human decision (approve, modify, or reject) for a suggestion.
 
     TODO: Implement approval action processing and file move execution.
+    Expected body: {"action": "APPROVE|MODIFY|REJECT", "custom_filename": null, "custom_tags": null}
     """
     return {
         "status": "placeholder",
         "message": "Approval action is not yet implemented.",
         "approval_id": approval_id,
+        "received_action": action_data.get("action") if action_data else None,
     }

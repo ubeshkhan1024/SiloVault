@@ -5,7 +5,7 @@ This document defines the proposed multi-phase development roadmap for **SiloVau
 For overall scope and terminology, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For structural design, see [ARCHITECTURE.md](ARCHITECTURE.md). For data movement, see [DATA_FLOW.md](DATA_FLOW.md). For security guidelines, see [SECURITY.md](SECURITY.md).
 
 > [!NOTE]
-> **Status:** This roadmap is a **Proposed Plan**. Except for Phase 0 foundation documentation and repository setup, no software phases are currently active or implemented.
+> **Status:** This roadmap is a **Proposed Plan**. **Phase 0 (Foundation) is complete** — documentation, repository setup, and an application skeleton (FastAPI backend with 14 registered routes, PWA frontend shell with 6 views, test scaffolding with 6 tests) are in place. All non-health endpoints are placeholder stubs. Subsequent phases are not yet active.
 
 ---
 
@@ -27,16 +27,17 @@ flowchart TD
 ## Detailed Phase Specifications
 
 ### Phase 0 — Foundation & Governance
-* **Status:** **IN PROGRESS / NEAR COMPLETION** (Foundation docs established)
-* **Objective:** Establish project rules, architectural blueprints, documentation standards, and repository safety boundaries before writing application code.
+* **Status:** **COMPLETE** (Foundation docs, repository setup, and application skeleton established)
+* **Objective:** Establish project rules, architectural blueprints, documentation standards, repository safety boundaries, and an application skeleton before writing application code.
 * **Main Features:**
   - Standardized repository layout and strict `.gitignore` rules.
   - Development guidelines (`AGENTS.md`) for human and AI pair programming.
   - Architectural blueprints (`PROJECT_OVERVIEW`, `ARCHITECTURE`, `DATA_FLOW`, `SECURITY`).
   - Draft initial API contract principles (`API_CONTRACT.md`).
+  - **Application skeleton:** FastAPI backend with 14 registered routes, PWA frontend shell with 6 views, test scaffolding with 6 tests.
 * **Dependencies:** None.
-* **Expected Deliverables:** Clean root repository containing verified governance files and markdown documentation.
-* **Completion Criteria:** All core foundation documents created, reviewed, and committed to GitHub without application source code or tracking errors.
+* **Expected Deliverables:** Clean root repository containing verified governance files, markdown documentation, and a runnable application skeleton (health endpoint functional).
+* **Completion Criteria:** All core foundation documents created, reviewed, and committed to GitHub; application skeleton runs and passes health checks.
 
 ---
 

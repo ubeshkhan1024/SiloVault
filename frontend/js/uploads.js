@@ -36,12 +36,6 @@ export function initUploadsView() {
 
         // Display selected files in the local queue (UI only).
         displayLocalQueue(selectedFiles, uploadQueue);
-
-        // NOTE: No actual upload occurs in the skeleton stage.
-        console.warn(
-            "SiloVault skeleton: file upload transmission is not implemented.",
-            selectedFiles
-        );
     });
 }
 

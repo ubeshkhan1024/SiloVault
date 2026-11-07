@@ -6,7 +6,7 @@ and incident response protocols for **SiloVault**.
 For overall project vision, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For system components, see [ARCHITECTURE.md](ARCHITECTURE.md). For development safety rules, see [AGENTS.md](../AGENTS.md).
 
 > [!NOTE]
-> **Status:** This document specifies **Proposed** and **Planned** security controls for future implementation. The repository currently contains documentation, rules, and configuration only.
+> **Status:** This document specifies **Proposed** and **Planned** security controls for future implementation. The repository currently contains documentation, rules, configuration, and an **application skeleton** (FastAPI backend with 14 registered routes, PWA frontend shell with 6 views). All non-health endpoints are placeholder stubs with no business logic.
 
 ---
 
@@ -86,7 +86,7 @@ Files uploaded remotely or processed locally must be treated as untrusted input.
 
 ## 8. GitHub & Developer Safety
 
-* **Repository Hygiene:** `.gitignore` actively excludes `.env`, `*.db`, `uploads/`, `logs/`, `models/`, and `credentials/`.
+* **Repository Hygiene:** `.gitignore` actively excludes `.env`, `*.db`, `/uploads/`, `/logs/`, `/models/`, `/secrets/`, `/credentials/`, and other runtime artifacts at the repository root.
 * **Dependency Auditing:** Dependencies introduced to the project must be audited for known vulnerabilities (e.g., using `pip-audit` or GitHub Dependabot).
 * **Code Review:** All changes affecting authentication, file handling, network bindings, or secret storage require review against [AGENTS.md](../AGENTS.md).
 
