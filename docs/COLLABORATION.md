@@ -280,8 +280,12 @@ must also obey them.
 ### Scope and coordination
 
 - **Agree on API contract changes before editing related code.** If Developer A
-  plans to add a field to a request schema, Developer B must know before
-  touching the corresponding frontend code or endpoint stub.
+  plans to add a field to a request schema or change a file metadata attribute,
+  Developer B must know before touching the corresponding frontend code or endpoint stub.
+- **Maintain Provider Adapter Independence.** When adding or updating a cloud provider
+  adapter (Google Drive, OneDrive, Dropbox, Box, MEGA), adhere strictly to the common
+  `StorageAdapter` interface in `backend/storage/base.py`. Never add provider-specific
+  logic into core routing or AI pipeline modules.
 - **Avoid simultaneously editing the same file.** Claim files via the branch
   name or leave a quick chat message ("working on health.py") before you
   start. Conflicts on the same file are solvable but waste time.
@@ -315,15 +319,20 @@ apply equally to both developers. Key points summarised here:
 1. **Never commit `.env`, credentials, API keys, databases, uploaded user
    files, or model weights.** These are excluded by `.gitignore`; committing
    them would leak sensitive data publicly.
-2. **Keep `.env.example` current.** When a supported configuration field is
+2. **Multi-cloud credentials must stay local.** Client secrets and OAuth refresh
+   tokens for Google Drive, Microsoft OneDrive, Dropbox, and Box, as well as
+   derived master keys for MEGA, must be stored securely encrypted on the local
+   backend and **never exposed to the frontend**.
+3. **Keep `.env.example` current.** When a supported configuration field is
    added to `backend/config.py`, add the matching variable to
    `.env.example` in the same commit so the template stays accurate.
-3. **Do not expose local services to the public internet.** The backend binds
+4. **Do not expose local services to the public internet.** The backend binds
    to `127.0.0.1` (loopback only). The frontend uses `localhost:3000`.
    Local Ollama on `127.0.0.1:11434` is never tunnelled or forwarded.
-4. **Preserve user originals.** Consequential file operations (move, rename,
-   discard) require explicit human approval before execution.
-5. **Review every PR for secret leakage.** Check diffs for bare strings that
+5. **Preserve user originals.** Consequential file operations (move, rename,
+   discard) require explicit human approval before execution. AI is prohibited
+   from silently deleting or overwriting user files on any provider.
+6. **Review every PR for secret leakage.** Check diffs for bare strings that
    look like tokens, passwords, client IDs, or private keys. If found, do
    not merge until the credential is removed or redacted.
 
@@ -357,15 +366,18 @@ needed but keep the conceptual steps identical.
 
 ## 7. Decisions Requiring Developer Agreement
 
-Before the first collaborative session, discuss and agree on these items:
+Before the first collaborative session in December, discuss and agree on these items:
 
 | Decision | Options | Status |
 |----------|---------|--------|
+| Database layer architecture | Sync SQLite vs Async (`aiosqlite` + SQLAlchemy 2.0 async) | Pending |
+| Multi-cloud credential storage | Local encrypted database vs OS Keyring | Pending |
+| Cloud provider implementation sequence | Google Drive (M3) -> OneDrive (M5) -> Dropbox -> Box | Proposed in Roadmap |
 | Branch protection on `main` | Require PR + review / allow force-push | Pending |
 | Merge style for approved PRs | Squash / rebase / merge-commit | Pending |
 | Who triggers release builds | Either developer / rotate weekly | Pending |
 | Test-gate on merge | Require all tests green / human judgement OK | Pending |
 | Default issue tracker usage | Labels, milestones, assignees | Pending |
 
-Record decisions in [docs/ROADMAP.md](ROADMAP.md) under "Open questions" or a
-dedicated "Decisions log" entry so both developers have a shared reference.
+Record decisions in [docs/ROADMAP.md](ROADMAP.md) under "Key Architectural Decisions Requiring Alignment"
+so both developers have a shared reference.

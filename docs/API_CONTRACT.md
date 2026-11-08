@@ -83,12 +83,17 @@ The primary local backend on the Windows laptop exposes local management endpoin
   > **TARGET CONTRACT / FUTURE IMPLEMENTATION** — Current placeholder returns nested `components` object with mock values.
 
 ### 2.2 File Indexing & Metadata
-* **`GET /api/v1/files`** — List indexed local and synchronized files.
-* **`GET /api/v1/files/{file_id}`** — Retrieve file details, tags, and category metadata.
+* **`GET /api/v1/files`** — List indexed files across all or specific connected storage providers.
+  - Query parameters (proposed): `provider` (optional filter, e.g. `google_drive`, `onedrive`), `search` (keyword), `limit`, `offset`.
+* **`GET /api/v1/files/{file_id}`** — Retrieve unified file details, tags, category, and native provider reference.
   ```json
   {
     "file_id": "file_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "provider": "GOOGLE_DRIVE",
+    "provider_account_id": "acc_personal_drive",
+    "provider_file_id": "1A2B3C4D5E6F7G8H9I0J",
     "original_name": "receipt_scan_042.pdf",
+    "logical_path": "/Finances/2026/Receipts/receipt_scan_042.pdf",
     "mime_type": "application/pdf",
     "size_bytes": 1048576,
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -101,8 +106,8 @@ The primary local backend on the Windows laptop exposes local management endpoin
   > **TARGET CONTRACT / FUTURE IMPLEMENTATION** — Current placeholders return wrapper objects (`{"status": "placeholder", "message": "...", "files": []}` and `{"status": "placeholder", "message": "...", "file_id": "..."}`) instead of direct arrays/objects.
 
 ### 2.3 Synchronization Control
-* **`GET /api/v1/sync/status`** — Get active intake queue and sync progress.
-* **`POST /api/v1/sync/trigger`** — Trigger immediate poll of Google Drive Mobile Inbox.
+* **`GET /api/v1/sync/status`** — Get active intake queues, sync progress, and provider connectivity states.
+* **`POST /api/v1/sync/trigger`** — Trigger immediate poll of connected intake inboxes (optional query param: `provider_id`).
 
 ### 2.4 AI Processing Queue
 * **`POST /api/v1/ai/process/{file_id}`** — Trigger local OCR and AI classification for a file.
@@ -116,6 +121,7 @@ The primary local backend on the Windows laptop exposes local management endpoin
       {
         "approval_id": "appr_12345",
         "file_id": "file_9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+        "provider": "GOOGLE_DRIVE",
         "current_path": "GoogleDrive:/MobileInbox/receipt_scan_042.pdf",
         "proposed_path": "GoogleDrive:/Finances/2026/Receipts/2026-11-07_Grocery_Store.pdf",
         "proposed_tags": ["#groceries", "#2026"],
@@ -138,18 +144,23 @@ The primary local backend on the Windows laptop exposes local management endpoin
   > **TARGET CONTRACT / FUTURE IMPLEMENTATION** — Current placeholder accepts any JSON body and returns `received_action`. **Known issue:** Frontend `submitApprovalAction` sends only `{action}`; contract expects `{action, custom_filename, custom_tags}`. To be fixed in December.
 
 ### 2.6 Activity History & Audit Log
-* **`GET /api/v1/activity`** — Query operational log history (moves, renames, syncs).
-* **`POST /api/v1/activity/rollback/{activity_id}`** — Request single-click rollback of a previous move operation.
+* **`GET /api/v1/activity`** — Query operational log history (moves, renames, syncs across providers).
+* **`POST /api/v1/activity/rollback/{activity_id}`** — Request single-click rollback of a previous move operation via the appropriate provider adapter.
+
+### 2.7 Proposed Storage Provider Management (Future Phase 2+)
+* **`GET /api/v1/providers`** — List registered cloud storage providers, connection states, and declared capabilities.
+* **`POST /api/v1/providers/{provider_type}/connect`** — Initiate secure local OAuth exchange (Google Drive, OneDrive, Dropbox, Box) or secure master key/credential exchange (MEGA).
+* **`DELETE /api/v1/providers/{account_id}`** — Disconnect account and revoke active session.
 
 ---
 
 ## 3. Proposed Mobile Application Interface
 
-The mobile application communicates with Google Drive for uploads and the Cloud Control Plane for metadata.
+The mobile application communicates with cloud storage inboxes for uploads and the Cloud Control Plane for metadata.
 
 * **Authentication:** `POST /api/v1/auth/login` (Obtains access & refresh tokens via Supabase Auth).
 * **Device Registration:** `POST /api/v1/devices/register` (Registers mobile device ID for notifications).
-* **Direct Storage Upload:** Mobile uploads stream file bytes directly to Google Drive API (`/upload/drive/v3/files`) targeting the dedicated Mobile Inbox directory.
+* **Direct Storage Upload:** Mobile uploads stream file bytes directly to the target cloud provider intake (e.g., Google Drive API `/upload/drive/v3/files` or OneDrive/Dropbox/MEGA upload endpoints).
 * **Upload Progress & Status Query:** Mobile app queries cloud metadata endpoints to check if uploaded files have been processed by the local node.
 
 ---
@@ -158,9 +169,13 @@ The mobile application communicates with Google Drive for uploads and the Cloud 
 
 | Service | Primary Responsibilities | Data Exchanged |
 |---|---|---|
-| **Google Drive API** | Direct payload storage, Mobile Inbox folder storage, final folder moves/renames. | Raw file binaries, Drive folder IDs, storage tokens. |
+| **Google Drive API** | Direct payload storage, Mobile Inbox folder storage, final folder moves/renames via Google Drive Adapter. | Raw file binaries, Drive folder IDs, storage tokens. |
+| **Microsoft OneDrive API** | Payload storage, delta synchronization, driveItem moves/renames via OneDrive Adapter. | Raw file binaries, Graph driveItem IDs, tokens. |
+| **Dropbox API** | Payload storage, cursor-based folder listing, chunked upload sessions via Dropbox Adapter. | Raw file binaries, Dropbox paths/IDs, tokens. |
+| **Box API** | Enterprise storage, metadata templates, chunked uploads via Box Adapter. | Raw file binaries, Box file IDs, tokens. |
+| **MEGA API (Proposed)** | Zero-knowledge client-side encrypted storage, client-side decrypted intake via MegaAdapter. | Ciphertext binaries, node handles, encrypted file keys. Plaintext never sent to MEGA servers. |
 | **Supabase (Proposed)** | User account authentication, device registration, metadata state synchronization across clients. | JWTs, file metadata JSON (hashes, tags, paths, states). No file binaries. |
-| **Local Sync Service** | Polling Mobile Inbox, downloading intake payloads to local node, registering tasks in SQLite. | File payloads, state change triggers, checksum verification. |
+| **Local Sync Service** | Polling inboxes across provider adapters, downloading intake payloads to local node, registering tasks in SQLite. | File payloads, state change triggers, checksum verification. |
 
 ---
 

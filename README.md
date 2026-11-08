@@ -1,35 +1,37 @@
 # SiloVault
 
-> A privacy-focused, AI-powered cloud file management system.
+> A privacy-focused, AI-powered unified cloud storage management platform.
 
 **Status:** Foundation phase complete. Application skeleton implemented with FastAPI backend (14 registered routes) and PWA frontend shell. All endpoints except `GET /api/v1/health` are placeholder stubs.
 
 ## What SiloVault is
 
-SiloVault is a file management system where **AI processing happens locally** on a
-primary Windows laptop, while **files and metadata live in the cloud** (Google Drive
-is the initial storage provider). A lightweight mobile app lets you upload files
-remotely; a dedicated mobile-upload inbox receives them; and a local AI pipeline
-classifies, tags, OCRs, extracts metadata from, and organizes the files.
+SiloVault is a privacy-first, unified cloud storage platform where **AI processing happens locally** on a
+primary machine (Windows laptop), while **files and metadata live across user-connected cloud storage providers**
+(initial support: Google Drive; planned: Microsoft OneDrive, Dropbox, Box, MEGA, and others). A lightweight mobile app
+lets you upload files remotely to cloud inboxes; and a local AI pipeline classifies, tags, OCRs, extracts
+metadata from, and organizes files across connected storage accounts from one central interface.
 
-The guiding idea: keep the intelligence local and private, keep the files safe and
-reversible, and keep the cloud as storage and metadata — not as a place where your
-originals are silently altered.
+The guiding idea: keep the intelligence local and private, provide a single unified pane of glass across multiple
+cloud storage providers via a modular provider-adapter architecture, keep originals safe and reversible, and
+ensure AI never alters or deletes user files without explicit human approval.
 
 ## Core principles
 
 These are confirmed project decisions. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 and [docs/SECURITY.md](docs/SECURITY.md) for the full treatment.
 
+- **Unified Multi-Cloud Management.** Browse, search, organize, and manage files across multiple cloud storage
+  providers (Google Drive, OneDrive, Dropbox, Box, MEGA) through a single interface without vendor lock-in.
+- **Provider-Independent Architecture.** Storage adapters implement a common interface with explicit capability
+  negotiation, keeping the core system decoupled from any specific provider.
 - **Originals are sacred.** AI must never silently delete or overwrite original files.
-- **Human approval** is required for organization changes that could be consequential.
-- **Reversibility.** Operations should be undoable wherever possible.
-- **Local AI.** AI processing stays on the primary laptop and is never exposed
-  directly to the public internet.
-- **Separation of concerns.** Cloud metadata and actual file storage are treated as
-  distinct concerns.
-- **Offline-tolerant uploads.** Mobile uploading must work even when the laptop is offline.
-- **No secrets in Git.** Credentials and secrets never live in the repository.
+- **Human approval** is required for organization changes that could be consequential (moves, renames, deletions).
+- **Reversibility.** Operations should be undoable wherever possible with audit logging and rollback support.
+- **Local AI.** AI processing (via Ollama) stays on the primary local node and is never exposed directly to the public internet.
+- **Separation of concerns.** Cloud metadata, account management, and physical file storage are distinct, decoupled layers.
+- **Offline-tolerant uploads.** Remote uploading works even when the primary laptop is offline.
+- **No secrets in Git.** Credentials and OAuth tokens never live in the repository or leak to the frontend.
 
 ## Repository structure
 
@@ -58,7 +60,7 @@ SiloVault/
 │   ├── js/              # ES modules (app, api, dashboard, files, uploads, settings)
 │   ├── manifest.json    # PWA manifest
 │   └── service-worker.js # Offline shell caching
-├── docs/                # Project documentation (6 files)
+├── docs/                # Project documentation (7 files)
 ├── tests/               # Pytest suite (6 tests)
 ├── data/                # Local data directory (gitignored)
 ├── uploads/             # Upload staging (gitignored)

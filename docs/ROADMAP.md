@@ -1,143 +1,230 @@
 # SiloVault — Phased Development Roadmap
 
-This document defines the proposed multi-phase development roadmap for **SiloVault**.
+This document defines the proposed multi-phase development roadmap for **SiloVault** as it evolves into a **privacy-focused, AI-powered unified cloud storage management platform**.
 
 For overall scope and terminology, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For structural design, see [ARCHITECTURE.md](ARCHITECTURE.md). For data movement, see [DATA_FLOW.md](DATA_FLOW.md). For security guidelines, see [SECURITY.md](SECURITY.md).
 
 > [!NOTE]
-> **Status:** This roadmap is a **Proposed Plan**. **Phase 0 (Foundation) is complete** — documentation, repository setup, and an application skeleton (FastAPI backend with 14 registered routes, PWA frontend shell with 6 views, test scaffolding with 6 tests) are in place. All non-health endpoints are placeholder stubs. Subsequent phases are not yet active.
+> **Status:** This roadmap is a **Proposed Plan**. **Phase 0 (Foundation) is complete** — documentation, repository setup, and an application skeleton (FastAPI backend with 14 registered routes, PWA frontend shell with 6 views, test scaffolding with 6 tests) are in place. All non-health endpoints are placeholder stubs. Subsequent milestones are scheduled for implementation beginning in December 2026.
 
 ---
 
-## Roadmap Overview & Phase Dependencies
+## Roadmap Overview & Milestone Dependencies
 
 ```mermaid
 flowchart TD
-    P0["Phase 0: Foundation\n(Docs & Rules)"] --> P1["Phase 1: Local Core\n(FastAPI & SQLite)"]
-    P1 --> P2["Phase 2: AI Processing\n(Ollama, OCR, Tagging)"]
-    P1 --> P3["Phase 3: Cloud Integration\n(Google Drive API & Inbox Sync)"]
-    P2 & P3 --> P4["Phase 4: Mobile Uploader\n(PWA Upload Interface)"]
-    P3 & P4 --> P5["Phase 5: Cloud Control Plane\n(Supabase Metadata Sync)"]
-    P2 & P3 & P4 & P5 --> P6["Phase 6: Collaboration & Reliability\n(Testing, Security & Backup)"]
-    P6 --> P7["Phase 7: Future Expansion\n(Android Native, S3, Multi-device)"]
+    M0["Phase 0: Foundation & Governance\n(COMPLETE - Skeleton & Docs)"] --> M1["Milestone 1: Local Storage Foundation\n(DB, Metadata Model, Local Indexing)"]
+    M1 --> M2["Milestone 2: Unified Storage Architecture\n(Provider Interface, Capabilities, Account Model)"]
+    M2 --> M3["Milestone 3: First Cloud Integration\n(Google Drive Adapter, Auth, Intake Sync)"]
+    M1 & M3 --> M4["Milestone 4: Local AI Pipeline\n(Ollama, OCR, Tagging, Approval Queue)"]
+    M2 & M3 --> M5["Milestone 5: Additional Cloud Providers\n(OneDrive, Dropbox, Box Adapters)"]
+    M3 & M4 & M5 --> M6["Milestone 6: Mobile & Advanced Sync\n(PWA Uploader, Offline Queue, Multi-Sync)"]
+    M6 --> M7["Phase 7: Future Expansion\n(Natural Language Search, Vector RAG, S3)"]
 ```
 
 ---
 
-## Detailed Phase Specifications
+## Detailed Milestone Specifications
 
 ### Phase 0 — Foundation & Governance
-* **Status:** **COMPLETE** (Foundation docs, repository setup, and application skeleton established)
-* **Objective:** Establish project rules, architectural blueprints, documentation standards, repository safety boundaries, and an application skeleton before writing application code.
-* **Main Features:**
-  - Standardized repository layout and strict `.gitignore` rules.
-  - Development guidelines (`AGENTS.md`) for human and AI pair programming.
-  - Architectural blueprints (`PROJECT_OVERVIEW`, `ARCHITECTURE`, `DATA_FLOW`, `SECURITY`).
-  - Draft initial API contract principles (`API_CONTRACT.md`).
-  - **Application skeleton:** FastAPI backend with 14 registered routes, PWA frontend shell with 6 views, test scaffolding with 6 tests.
-* **Dependencies:** None.
-* **Expected Deliverables:** Clean root repository containing verified governance files, markdown documentation, and a runnable application skeleton (health endpoint functional).
-* **Completion Criteria:** All core foundation documents created, reviewed, and committed to GitHub; application skeleton runs and passes health checks.
+* **Status:** **COMPLETE**
+* **Objective:** Establish repository safety, architectural blueprints, development guidelines, collaboration workflows, and a runnable application skeleton.
+* **Deliverables:** Clean repository layout, `.gitignore`, `AGENTS.md`, `README.md`, core documentation (`docs/`), FastAPI backend with 14 registered routes, PWA frontend shell with 6 views, and 6 passing tests.
 
 ---
 
-### Phase 1 — Local Core Engine
+### Milestone 1 — Local Storage Foundation
+* **Status:** **PLANNED (First December Milestone)**
+* **Objective:** Build a robust, persistence-backed local foundation capable of tracking files, schemas, and operational history without cloud dependencies.
+* **Key Capabilities:**
+  - SQLAlchemy models and SQLite database initialization (`silo_vault.db`).
+  - Unified file metadata model (`UnifiedFileRecord`) tracking filename, logical path, MIME type, size, SHA-256 hash, and timestamps.
+  - Safe local path resolution and traversal sanitization (preventing `../` attacks).
+  - Real file registration and listing endpoints (`GET /api/v1/files`, `GET /api/v1/files/{file_id}`).
+  - Dynamic file listing in the PWA frontend dashboard replacing placeholder text.
+* **Dependencies & Prerequisites:** Phase 0 foundation skeleton.
+* **Deliverables:** `backend/database.py` session management, `backend/models/file.py`, `backend/schemas/file.py`, populated `/files` endpoints, updated dashboard view.
+* **Relevant Areas:**
+  - Backend: `backend/database.py`, `backend/models/`, `backend/schemas/`, `backend/api/v1/endpoints/files.py`.
+  - Frontend: `frontend/js/files.js`, `frontend/js/dashboard.js`, `frontend/js/api.js`.
+  - Docs: `docs/API_CONTRACT.md`.
+* **Suggested Tests:**
+  - Unit tests for database table creation and CRUD operations.
+  - Path traversal security tests (malicious filenames and paths).
+  - API endpoint integration tests for `GET /api/v1/files` returning real JSON lists.
+* **Risks & Decisions:**
+  - *Decision:* Synchronous SQLite vs `aiosqlite` with async SQLAlchemy sessions.
+  - *Risk:* Concurrent write lock contention in SQLite during bulk indexing.
+* **Suggested Ownership:** Developer 1 (Windows / Backend Core).
+
+---
+
+### Milestone 2 — Unified Storage Architecture
 * **Status:** **PLANNED**
-* **Objective:** Build a minimal, functional local backend service on the Windows laptop capable of managing local files, SQLite metadata, and operational history.
-* **Main Features:**
-  - `FastAPI` application server running locally on `127.0.0.1`.
-  - `SQLite` database schema for tracking local file states, hashes (SHA-256), and audit logs.
-  - Local file scanner, MIME/extension identification, and file path indexer.
-  - Basic file management engine (safe copy, rename, reversible move abstractions).
-  - Local operational history log and rollback registry.
-* **Dependencies:** Phase 0.
-* **Expected Deliverables:** Executable local backend module with database migration scripts and local CLI/API test scripts.
-* **Completion Criteria:** Local backend starts, creates local SQLite tables, indexes sample local directories, and logs file moves with 100% test coverage for path traversal and rollbacks.
+* **Objective:** Design and implement the provider-independent storage layer that allows SiloVault to connect multiple cloud providers through a common contract.
+* **Key Capabilities:**
+  - Abstract base class `StorageAdapter` defining standard methods (`authenticate`, `list_files`, `get_metadata`, `upload`, `download`, `rename`, `move`, `delete`, `check_sync_status`).
+  - Provider capability model declaring feature flags (`supports_delta_sync`, `supports_chunked_upload`, `addressing_mode`).
+  - Account and connection manager in the backend for storing encrypted provider credentials and tokens locally.
+  - Virtual multi-provider namespace in `UnifiedStorageService`.
+  - Standardized error handling and mapping (`NormalizedStorageError`, rate-limit handling).
+* **Dependencies & Prerequisites:** Milestone 1 (data models for storing provider accounts and references).
+* **Deliverables:** `backend/storage/base.py`, `backend/storage/capabilities.py`, `backend/storage/service.py`, `backend/models/provider_account.py`.
+* **Relevant Areas:**
+  - Backend: `backend/storage/`, `backend/models/`, `backend/schemas/`.
+  - Frontend: `frontend/js/settings.js` (provider accounts view).
+  - Docs: `docs/ARCHITECTURE.md`.
+* **Suggested Tests:**
+  - Mock adapter unit tests verifying interface compliance and capability flags.
+  - Error normalization tests for HTTP 429, 401, 404, 503 translations.
+  - Multi-account registry isolation tests.
+* **Risks & Decisions:**
+  - *Decision:* Key management strategy for encrypting stored OAuth refresh tokens on disk.
+  - *Decision:* Virtual path routing syntax (e.g., `/{provider}/{account_id}/path`).
+* **Suggested Ownership:** Developer 2 (macOS / Architecture & Storage Abstractions).
 
 ---
 
-### Phase 2 — Local AI Processing Pipeline
+### Milestone 3 — First Cloud Integration: Google Drive
 * **Status:** **PLANNED**
-* **Objective:** Integrate local AI models for document OCR, image analysis, automatic classification, tagging, and structured human approval queues.
-* **Main Features:**
-  - Local `Ollama` client integration for offline inference.
-  - Local OCR engine (e.g., Tesseract or local vision model) for document and image text extraction.
-  - Prompt formatting engine enforcing structured JSON output for categories and tags.
-  - Human Approval Queue logic for flagging consequential file operations.
-  - Quarantining pipeline for unreadable or corrupted files.
-* **Dependencies:** Phase 1.
-* **Expected Deliverables:** Modular AI processing pipeline, prompt templates, and approval queue APIs.
-* **Completion Criteria:** Local backend successfully processes local sample PDFs/images, extracts text via OCR, receives JSON tags from Ollama, and queues consequential moves for approval.
+* **Objective:** Implement the first concrete cloud storage adapter using the Google Drive API, enabling real cloud file ingestion and management.
+* **Key Capabilities:**
+  - Concrete `GoogleDriveAdapter` implementing `StorageAdapter`.
+  - OAuth 2.0 PKCE / loopback flow for developer authentication with token refresh.
+  - Mobile Inbox folder monitoring and intake polling.
+  - Resumable file upload and streaming download.
+  - Reversible file moves and rename operations within Google Drive.
+  - Exponential backoff retry handler for Google Drive API rate limits.
+* **Dependencies & Prerequisites:** Milestone 2 (Provider Adapter Interface).
+* **Deliverables:** `backend/storage/google_drive.py`, OAuth credentials configuration, functional sync polling worker.
+* **Relevant Areas:**
+  - Backend: `backend/storage/google_drive.py`, `backend/api/v1/endpoints/sync.py`, `backend/config.py`.
+  - Frontend: `frontend/js/sync.js`, `frontend/js/settings.js`.
+  - Docs: `docs/API_CONTRACT.md`, `docs/DATA_FLOW.md`.
+* **Suggested Tests:**
+  - Mock Google Drive API tests for folder listing, pagination, and download streaming.
+  - OAuth token refresh flow tests.
+  - Rate-limit backoff simulation tests.
+* **Risks & Decisions:**
+  - *Decision:* Google Drive API scopes (full drive vs restricted `drive.file` / app-folder scope).
+  - *Risk:* API quota consumption during polling loops (mitigated by using `Changes.list` with page tokens).
+* **Suggested Ownership:** Developer 1 (Windows / Cloud Sync Worker).
 
 ---
 
-### Phase 3 — Cloud Storage & Inbox Synchronization
+### Milestone 4 — Local AI Processing Pipeline
 * **Status:** **PLANNED**
-* **Objective:** Establish secure Google Drive API integration to poll a dedicated Mobile Inbox and synchronize files to the local node.
-* **Main Features:**
-  - Google Drive OAuth 2.0 authentication integration with secure local token storage.
-  - Mobile Inbox directory monitoring service (polling / webhook triggers).
-  - Synchronization engine supporting `PENDING`, `DOWNLOADING`, `DOWNLOADED`, `COMPLETED`, `FAILED` state transitions.
-  - SHA-256 duplicate detection before download.
-  - Exponential backoff retry logic for cloud API rate limits and connection drops.
-* **Dependencies:** Phase 1 (Local Core).
-* **Expected Deliverables:** Sync worker service, Google Drive client wrapper, and sync state transition logger.
-* **Completion Criteria:** Local sync engine automatically detects new files added manually to a Google Drive inbox folder, downloads them to local temp storage, and handles simulated network drops cleanly.
+* **Objective:** Connect the local Ollama AI engine and local OCR to classify files, extract metadata, generate tags, and route consequential actions through human review.
+* **Key Capabilities:**
+  - Local HTTP client connecting to `http://127.0.0.1:11434` (Ollama) with configurable model (`llama3:8b`).
+  - Local OCR extraction for PDFs and images.
+  - Structured prompt engine constraining Ollama outputs to strict JSON schemas.
+  - Duplicate detection engine comparing universal SHA-256 hashes.
+  - Human Approval Queue (`GET /api/v1/approvals/pending`, `POST /api/v1/approvals/{approval_id}/action`).
+  - Approval UI in PWA for reviewing, editing, approving, or rejecting proposed renames/moves.
+* **Dependencies & Prerequisites:** Milestone 1 (file records) and Milestone 3 (real file payloads downloaded to intake temp sandbox).
+* **Deliverables:** `backend/ai/ollama_client.py`, `backend/ai/ocr.py`, `backend/ai/pipeline.py`, populated `/ai` and `/approvals` endpoints.
+* **Relevant Areas:**
+  - Backend: `backend/ai/`, `backend/api/v1/endpoints/processing.py`, `backend/api/v1/endpoints/review.py`.
+  - Frontend: `frontend/js/dashboard.js`, `frontend/js/api.js` (approval actions).
+  - Docs: `docs/SECURITY.md`.
+* **Suggested Tests:**
+  - Mock Ollama response parsing tests ensuring JSON schema validation.
+  - Prompt injection isolation tests (adversarial text inside documents).
+  - Approval queue execution and rollback tests.
+* **Risks & Decisions:**
+  - *Risk:* Ollama inference latency on large documents (mitigated by asynchronous background queue).
+  - *Decision:* OCR engine selection (Tesseract binary vs lightweight local Python OCR).
+* **Suggested Ownership:** Developer 2 (macOS / AI Pipeline & Approval UX).
 
 ---
 
-### Phase 4 — Mobile Uploader Interface
+### Milestone 5 — Additional Cloud Providers (OneDrive, Dropbox, Box, MEGA)
+* **Status:** **PLANNED / PROPOSED**
+* **Objective:** Expand the multi-cloud platform by implementing adapters for Microsoft OneDrive, Dropbox, Box, and MEGA based on the Milestone 2 architecture.
+* **Key Capabilities:**
+  - `OneDriveAdapter` utilizing Microsoft Graph API (upload sessions, delta queries).
+  - `DropboxAdapter` using Dropbox API v2 (`/files/list_folder/continue`, content hashes).
+  - `BoxAdapter` utilizing Box API (chunked upload, enterprise metadata).
+  - `MegaAdapter` integrating MEGA's client-side zero-knowledge E2EE architecture (scheduled as a later provider integration once standard OAuth adapters are stable).
+  - Cross-provider browsing and search in the PWA dashboard.
+  - Cross-provider duplicate detection using unified SHA-256 hashes.
+* **Dependencies & Prerequisites:** Milestone 2 (Adapter interface), Milestone 3 (lessons learned from Google Drive adapter), and a dedicated cryptographic/licensing spike for MEGA.
+* **Deliverables:** `backend/storage/onedrive.py`, `backend/storage/dropbox.py`, `backend/storage/box.py`, and `backend/storage/mega.py` (with an optional isolated process boundary recommended for security and reliability, not required by license).
+* **Relevant Areas:**
+  - Backend: `backend/storage/`, `backend/api/v1/endpoints/files.py`.
+  - Frontend: `frontend/js/files.js`, `frontend/js/settings.js`.
+  - Docs: `docs/ARCHITECTURE.md`.
+* **Suggested Tests:**
+  - Adapter contract compliance test suite run against each new provider mock.
+  - Multi-provider unified file search tests.
+  - Resumable upload session tests across varying chunk sizes.
+  - Local decryption verification test for MEGA ciphertext payload streams before SHA-256 calculation.
+* **Risks & Decisions:**
+  - *Risk:* Maintaining multiple cloud developer apps and OAuth verification requirements.
+  - *Decision:* Priority order of adapters (recommended sequence: OneDrive first, then Dropbox, then Box, followed by MEGA after the E2EE adapter spike).
+  - *MEGA Architecture Risk:* The official MEGA SDK is licensed under **BSD 2-Clause "Simplified"** (permissive, no copyleft), but MEGAcmd and third-party dependencies may carry other licenses (e.g., AGPLv3) and require individual audit. An official API key from MEGA Ltd. is required for production use. *Recommended:* Evaluate running MEGA operations in an isolated CLI subprocess (`MEGAcmd`) or separate micro-process boundary as a **security and reliability** measure (not a licensing requirement), to limit crash blast radius and simplify credential handling.
+  - *MEGA Key Management:* Establishing a secure workflow for master key / password derivation without ever storing plaintext passwords or exposing keys to the frontend.
+* **Suggested Ownership:** Shared / Decoupled (Developer 1 on OneDrive; Developer 2 on Dropbox & Box; Joint spike on MEGA).
+
+---
+
+### Milestone 6 — Mobile Client & Advanced Synchronization
 * **Status:** **PLANNED**
-* **Objective:** Create a lightweight, offline-tolerant Progressive Web App (PWA) allowing mobile users to upload photos, videos, and documents to the Google Drive Mobile Inbox.
-* **Main Features:**
-  - Responsive, lightweight PWA upload interface for iOS/Android browsers.
-  - Camera capture and document file picker integration.
-  - Direct upload stream targeting Google Drive Mobile Inbox.
-  - Offline upload queueing in browser storage (syncs when mobile device gains internet connection).
-  - Upload progress indicators and processing status tracking.
-* **Dependencies:** Phase 3.
-* **Expected Deliverables:** Mobile PWA client codebase, static deployment configuration, and mobile upload test guidelines.
-* **Completion Criteria:** Mobile user can open PWA on a smartphone, select or snap a photo, and upload it to Google Drive Mobile Inbox even while the primary laptop is turned off.
-
----
-
-### Phase 5 — Cloud Control Plane & Metadata Sync
-* **Status:** **PROPOSED**
-* **Objective:** Integrate a lightweight cloud backend (evaluating `Supabase`) to manage user sessions and synchronize metadata across devices.
-* **Main Features:**
-  - Supabase Auth / OAuth session coordination across Mobile PWA and Local Node.
-  - Cloud metadata database syncing file categories, tags, and activity status (without file binaries).
-  - Row Level Security (RLS) setup for multi-device/user isolation.
-  - Cross-device activity logging and real-time status updates on mobile.
-* **Dependencies:** Phase 3 & Phase 4.
-* **Expected Deliverables:** Supabase configuration, cloud database migration scripts, and metadata sync adapter.
-* **Completion Criteria:** Mobile PWA displays real-time status (e.g., "AI Processing...", "Awaiting Approval") for uploaded files by reading metadata synced from the local node via Supabase.
-
----
-
-### Phase 6 — Integration, Reliability & Security Hardening
-* **Status:** **PLANNED**
-* **Objective:** Consolidate features across both developers, conduct end-to-end security audits, implement automated test suites, and optimize performance.
-* **Main Features:**
-  - Integration of two-developer feature branches into GitHub main branch.
-  - Full end-to-end integration tests (Upload → Sync → Local AI → Approval → Cloud Move).
-  - Automated security audit (`pip-audit`, dependency review, path traversal verification).
-  - Backup & disaster recovery procedures for SQLite metadata and operation logs.
-  - Performance tuning for local OCR and Ollama inference batches.
-* **Dependencies:** Phases 1 through 5.
-* **Expected Deliverables:** Comprehensive test suite, security audit report, and disaster recovery guide.
-* **Completion Criteria:** System passes full end-to-end pipeline tests without error, handles simulated failure modes gracefully, and achieves full pass rating on security audit scripts.
+* **Objective:** Deliver an offline-friendly mobile PWA experience for capturing, uploading, and monitoring files across connected cloud storage inboxes.
+* **Key Capabilities:**
+  - Responsive mobile PWA with camera capture and native file picker integration.
+  - Offline upload queue backed by IndexedDB.
+  - Direct upload streaming to target cloud provider inboxes.
+  - Real-time or polled processing status indicators ("Uploaded", "Processing", "Awaiting Approval").
+  - Multi-provider conflict resolution (handling remote renames vs local organization moves).
+* **Dependencies & Prerequisites:** Milestone 3 (cloud intake) and Milestone 4 (approval workflows).
+* **Deliverables:** Enhanced `frontend/` PWA application, service worker offline caching, upload queue worker.
+* **Relevant Areas:**
+  - Frontend: `frontend/js/uploads.js`, `frontend/service-worker.js`, `frontend/manifest.json`.
+  - Backend: `backend/api/v1/endpoints/uploads.py`, `backend/api/v1/endpoints/sync.py`.
+  - Docs: `docs/DATA_FLOW.md`.
+* **Suggested Tests:**
+  - Service worker offline cache verification.
+  - IndexedDB upload queue retry tests on network reconnect.
+  - End-to-end upload to intake inbox simulation.
+* **Risks & Decisions:**
+  - *Risk:* Browser background execution limits on mobile OS (iOS Safari background timeouts).
+  - *Decision:* Mobile direct upload vs relaying through local node when local node is on same Wi-Fi.
+* **Suggested Ownership:** Developer 2 (Frontend / Mobile PWA Focus).
 
 ---
 
 ### Phase 7 — Future Expansion (Post-v1.0)
-* **Status:** **FUTURE POSSIBILTY**
-* **Objective:** Explore broader device support, alternative cloud providers, and advanced AI features after v1.0 stability.
+* **Status:** **FUTURE POSSIBILITY**
+* **Objective:** Advanced intelligence, storage providers, and platform extensions after v1.0 stability.
 * **Main Features:**
-  - Native Android application with background auto-upload sync.
-  - Support for additional cloud storage backends (AWS S3, Microsoft OneDrive, Dropbox).
-  - Support for secondary local nodes or desktop companion apps.
-  - Advanced local AI features: local vector database (RAG over user documents), semantic file search, automated document summarization.
-* **Dependencies:** Successful v1.0 release (Phases 0–6).
-* **Expected Deliverables:** Future feature proposals and experimental branch specifications.
-* **Completion Criteria:** Evaluated on a case-by-case basis as requested by project maintainers.
+  - Natural-language file search across all providers using local embeddings (e.g., ChromaDB/Qdrant + Ollama).
+  - Semantic document querying and automated summarization.
+  - Additional cloud providers: AWS S3, Nextcloud, WebDAV.
+  - Native Android application with background auto-upload synchronization.
+* **Dependencies:** Successful completion of Milestones 1–6.
+
+---
+
+## Developer Ownership & Collaboration Summary
+
+| Milestone | Primary Owner | Secondary Reviewer | Primary Focus Area |
+|---|---|---|---|
+| **M1: Local Storage Foundation** | Developer 1 | Developer 2 | SQLite models, path sanitization, file indexing |
+| **M2: Unified Storage Architecture** | Developer 2 | Developer 1 | StorageAdapter contract, capability flags, account model |
+| **M3: First Cloud Integration (Google Drive)** | Developer 1 | Developer 2 | Google Drive API, OAuth token storage, inbox polling |
+| **M4: Local AI Processing Pipeline** | Developer 2 | Developer 1 | Ollama client, prompt schemas, OCR, approval UI |
+| **M5: Additional Providers (OneDrive/Dropbox/Box/MEGA)** | Split | Reciprocal | OneDrive (Dev 1), Dropbox & Box (Dev 2), Joint spike (MEGA) |
+| **M6: Mobile & Advanced Sync** | Developer 2 | Developer 1 | PWA upload queue, offline resilience, conflict handling |
+
+---
+
+## Key Architectural Decisions Requiring Alignment
+
+Before starting December implementation, the two developers must formally agree on:
+
+1. **Async vs Sync Database Layer:** Whether to use SQLAlchemy 2.0 with synchronous SQLite or asynchronous `aiosqlite`.
+2. **Local Credential Storage:** Mechanism for storing cloud OAuth refresh tokens and MEGA credentials securely on disk (e.g., OS keyring vs AES-GCM encrypted local store with user passphrase).
+3. **Provider Priority & Roadmap Sequence:** Confirming Google Drive as initial target in M3, followed by OneDrive, Dropbox, and Box in M5, with MEGA scheduled as a subsequent E2EE integration spike.
+4. **Approval Action Schema:** Harmonizing `POST /api/v1/approvals/{id}/action` payload between backend expectation and frontend submission.
