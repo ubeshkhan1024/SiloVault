@@ -87,6 +87,11 @@ defined in [AGENTS.md](AGENTS.md). In short: inspect before modifying, work on o
 feature at a time, explain changes before implementing, ask before major
 architectural changes, and never run destructive operations without approval.
 
+A full two-developer collaboration guide — branch strategy, PR flow, setup for
+Windows and macOS, and security rules — lives in
+[docs/COLLABORATION.md](docs/COLLABORATION.md). New contributors should read it
+first.
+
 ## Getting started
 
 The application skeleton can be run locally:
@@ -101,9 +106,9 @@ uvicorn backend.main:app --reload
 
 **Frontend (PWA):**
 ```bash
-npx serve frontend
-# or: python -m http.server -d frontend
-# Open http://localhost:3000 (or shown port)
+npx serve frontend -l 3000
+# or: python -m http.server 3000 -d frontend
+# Open http://localhost:3000
 ```
 
 **Testing:**

@@ -6,7 +6,7 @@ AI processing pipelines, and failure handling in **SiloVault**.
 For overall scope and definitions, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For system topology, see [ARCHITECTURE.md](ARCHITECTURE.md). For safety rules, see [AGENTS.md](../AGENTS.md).
 
 > [!IMPORTANT]
-> **Status:** All workflows, state machines, and retry logic described in this document are **Proposed** or **Planned** designs. No application code or sync scripts are currently implemented.
+> **Status:** All workflows, state machines, and retry logic described in this document are **Proposed** or **Planned** designs. **The FastAPI backend skeleton (14 routes) and PWA frontend shell (6 views) exist**, but actual upload, synchronization, database workflows, and AI processing are **not implemented**. No application code or sync scripts are currently implemented.
 
 ---
 
