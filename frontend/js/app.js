@@ -19,6 +19,13 @@ const initializedViews = new Set();
  * @param {string} viewName - The target view identifier.
  */
 function ensureViewInitialized(viewName) {
+    // The Files view must always re-fetch when revisited so that newly
+    // uploaded or indexed records appear without a page reload.
+    if (viewName === "files") {
+        initFilesView();
+        return;
+    }
+
     if (initializedViews.has(viewName)) {
         return;
     }
@@ -26,9 +33,6 @@ function ensureViewInitialized(viewName) {
     switch (viewName) {
         case "dashboard":
             initDashboard();
-            break;
-        case "files":
-            initFilesView();
             break;
         case "uploads":
             initUploadsView();

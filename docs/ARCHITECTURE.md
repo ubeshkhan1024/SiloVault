@@ -16,13 +16,13 @@ To ensure clarity across all documentation, architecture elements are categorize
 
 | Status | Definition | Components |
 |---|---|---|
-| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton with 14 registered routes, PWA frontend shell (6 views, service worker), test scaffolding (6 tests). All non-health endpoints are placeholder stubs. |
-| **Planned** | Approved core requirement, design in progress | Primary Local Node, Unified Storage Service, Provider Adapter Interface, Google Drive Adapter, Mobile Inbox intake, AI Pipeline (Ollama), Human Review Queue, Reversible storage rules |
-| **Proposed** | Architectural choice under evaluation | Multi-provider adapters (Microsoft OneDrive, Dropbox, Box, MEGA), SQLite local metadata, Supabase for Cloud Control Plane |
+| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton with 14 registered routes, PWA frontend shell (6 views, service worker), SQLite database with Alembic migrations, `UnifiedFileRecord` model, real file CRUD endpoints (`POST /uploads`, `GET /files`, `GET /files/{id}`, `GET /files/{id}/download`, `DELETE /files/{id}`), frontend Files and Uploads views wired to backend, 81 automated tests across 9 test modules. Cloud adapter stubs, AI pipeline, mobile uploader, approval queue, and cloud provider integrations remain placeholder. |
+| **Planned** | Approved core requirement, design in progress | Unified Storage Service orchestration layer, Provider Adapter Interface (`StorageAdapter` base class), Google Drive Adapter, OneDrive/Dropbox/Box Adapters, Mobile Inbox intake, AI Pipeline (Ollama), Human Review Queue, Reversible storage rules |
+| **Proposed** | Architectural choice under evaluation | Multi-provider adapters (MEGA with E2EE), Supabase for Cloud Control Plane, Cross-device metadata sync |
 | **Future Possibility** | Concept for potential future extension | Additional storage providers (AWS S3, Nextcloud), multi-device sync, local vector DB / semantic search |
 
 > [!NOTE]
-> The application skeleton exists (FastAPI backend, PWA frontend, registered routes, tests) but contains no business logic, database models, cloud integrations, or AI processing. All backend, storage, adapter, and database selections remain proposed or planned.
+> Milestone 1 (Local Storage Foundation) is complete. The SQLite database, `UnifiedFileRecord` model, Alembic-migration-managed schema, and full file CRUD endpoint suite are implemented and tested. The remaining components — provider adapters, AI pipeline, mobile uploader, human approval queue, and cloud control plane — are documented as planned or proposed in the roadmap and have not yet been implemented.
 
 ---
 
@@ -270,3 +270,44 @@ The AI processing pipeline executes locally and is structured into discrete stag
 3. **Privacy by Default:** Local AI node never exposes an inbound public network endpoint. Ollama runs strictly on loopback (`127.0.0.1`).
 4. **Credential Isolation:** OAuth client secrets and user access tokens are kept in encrypted local storage; credentials are never transmitted to frontend clients.
 5. **Decoupled Multi-Cloud:** Storage providers, cloud metadata services, and local AI engines are connected via strict abstraction boundaries.
+
+## 6. Database Schema Management (Alembic)
+
+**Status: Implemented**
+
+The local SQLite metadata database is managed with **Alembic** for version-controlled schema migrations.
+
+### Design decisions
+
+- **Single source of truth for the database path.** Both the FastAPI application (`backend/config.py` → `settings.database_url`) and Alembic (`alembic/env.py`) resolve the database URL from the same `DATABASE_PATH` setting. There is no second, hardcoded path in `alembic.ini`; the `sqlalchemy.url` entry there is only a placeholder.
+- **Explicit, never automatic.** Application startup (`backend/main.py` lifespan) does **not** run Alembic migrations. `init_db()` in `backend/database.py` still calls `Base.metadata.create_all()`, which is idempotent and only creates missing tables for first-run setups — it never alters existing schemas. All schema changes to an existing database go through `alembic upgrade head`, run explicitly by a developer after reviewing the migration.
+- **Model registration contract.** `alembic/env.py` imports `backend.database.Base` and `backend.models` before assigning `target_metadata`, so autogenerate sees every registered table, index (including the partial unique `uq_local_provider_file`), and the custom `UTCDateTime` type decorator.
+- **SQLite compatibility.** `env.py` sets `render_as_batch=True` (required for SQLite constraint/index changes) and mirrors the application's WAL mode and busy-timeout pragmas on the migration connection.
+
+### Migration layout
+
+```
+alembic.ini                    # Alembic configuration (URL is a placeholder; env.py resolves it)
+alembic/
+├── env.py                     # Imports app settings + Base.metadata; runs migrations
+├── script.py.mako             # Template for new revision scripts
+└── versions/
+    └── b436c12118f9_create_unified_file_records_baseline.py   # baseline migration
+```
+
+### Current state
+
+- Baseline revision `b436c12118f9` represents the `UnifiedFileRecord` schema as of M1.
+- The existing development database was verified schema-identical to the baseline and **stamped** (no DDL executed) at `b436c12118f9`; existing records were preserved.
+
+### Commands
+
+| Command | Purpose |
+|---|---|
+| `alembic current` | Show the live database's current revision |
+| `alembic history` | Show the full migration history |
+| `alembic upgrade head` | Apply all pending migrations (run explicitly, after backup) |
+| `alembic revision --autogenerate -m "msg"` | Scaffold a new migration from model changes |
+| `alembic downgrade -1` | Revert one migration (local testing only) |
+
+See [README.md](../README.md#database-migrations-alembic) for the full developer workflow, including the temporary-database pattern for safe autogenerate and testing.

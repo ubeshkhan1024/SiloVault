@@ -2,7 +2,7 @@
 
 > A privacy-focused, AI-powered unified cloud storage management platform.
 
-**Status:** Foundation phase complete. Application skeleton implemented with FastAPI backend (14 registered routes) and PWA frontend shell. All endpoints except `GET /api/v1/health` are placeholder stubs.
+**Status:** Milestone 1 (Local Storage Foundation) complete. SQLite database with Alembic migrations, unified file metadata model, real CRUD endpoints (`POST /uploads`, `GET /files`, `GET /files/{id}`, `GET /files/{id}/download`, `DELETE /files/{id}`), and frontend Files/Uploads views wired to backend. Cloud provider adapters, AI pipeline, mobile uploader, and approval queue remain planned for future milestones.
 
 ## What SiloVault is
 
@@ -42,6 +42,7 @@ SiloVault/
 ├── .gitignore           # Excludes secrets, databases, user files, models, logs, etc.
 ├── requirements.txt     # Python dependencies
 ├── pyproject.toml       # Project metadata and build config
+├── alembic.ini          # Alembic migration configuration
 ├── .env.example         # Environment variable template
 ├── backend/             # FastAPI application
 │   ├── main.py          # App entry point
@@ -49,8 +50,8 @@ SiloVault/
 │   ├── database.py      # SQLAlchemy engine & session
 │   ├── dependencies.py  # FastAPI dependencies
 │   ├── api/v1/          # Versioned API routes (14 endpoints)
-│   ├── models/          # SQLAlchemy models (placeholder)
-│   ├── schemas/         # Pydantic schemas (placeholder)
+│   ├── models/          # SQLAlchemy models
+│   ├── schemas/         # Pydantic schemas
 │   ├── services/        # Business logic (placeholder)
 │   ├── storage/         # Cloud storage adapters (placeholder)
 │   └── ai/              # Local AI integration (placeholder)
@@ -60,13 +61,16 @@ SiloVault/
 │   ├── js/              # ES modules (app, api, dashboard, files, uploads, settings)
 │   ├── manifest.json    # PWA manifest
 │   └── service-worker.js # Offline shell caching
-├── docs/                # Project documentation (7 files)
-├── tests/               # Pytest suite (6 tests)
+├── docs/                # Project documentation
+├── tests/               # Pytest suite
 ├── data/                # Local data directory (gitignored)
 ├── uploads/             # Upload staging (gitignored)
 ├── models/              # Model weights (gitignored)
 ├── scripts/             # Utility scripts
-└── scratch/             # Temporary files (gitignored)
+├── scratch/             # Temporary files (gitignored)
+└── alembic/             # Alembic migrations (version-controlled)
+    ├── env.py           # Migration environment — reads app settings at runtime
+    └── versions/        # Migration revision scripts (commit these)
 ```
 
 ## Documentation conventions
@@ -116,8 +120,68 @@ npx serve frontend -l 3000
 **Testing:**
 ```bash
 pytest tests/
-# 6 tests pass against placeholder endpoints
+# 81 tests pass (1 skipped on Windows for platform-specific symlink check)
 ```
+
+## Database migrations (Alembic)
+
+SiloVault uses **Alembic** for version-controlled SQLite schema migrations. Migrations are **explicit, never automatic** — the FastAPI app does not run them on startup. This is intentional: migrations modify user data and must be reviewed before execution.
+
+### Commands
+
+Run all commands from the repository root with the virtual environment **active**:
+
+```powershell
+# Inspect the current revision of the live database
+alembic current
+
+# Show the full migration history
+alembic history
+
+# Upgrade the live database to the latest migration
+alembic upgrade head
+
+# Create a new migration after changing a model
+alembic revision --autogenerate -m "describe the change"
+
+# Downgrade one step (for local testing only — never on shared data)
+alembic downgrade -1
+
+# Reset to the very first migration
+alembic downgrade base
+```
+
+### Workflow for adding or changing a model
+
+1. Edit the SQLAlchemy model in `backend/models/`.
+2. Run `alembic revision --autogenerate -m "description"` to scaffold the migration.
+3. **Review the generated script** in `alembic/versions/` — do not blindly accept autogenerate output, especially for type changes or index modifications on SQLite.
+4. Commit the migration file.
+5. Run `alembic upgrade head` on any environment that needs the update.
+
+### Temp-database workflow (autogenerate & tests)
+
+Alembic reads `settings.database_url`, which defaults to `silo_vault.db`. To run autogenerate or migration tests against an isolated temporary database without touching the real one, override via the `DATABASE_PATH` environment variable — this is the same mechanism `pydantic-settings` uses:
+
+```powershell
+# Windows PowerShell
+$env:DATABASE_PATH="test_migration.db"
+alembic revision --autogenerate -m "my change"
+```
+
+All Alembic tests (`tests/test_alembic.py`) use this pattern so they never affect the production database.
+
+### Backup expectation
+
+Before running `alembic upgrade head` on a database containing real data, make a copy:
+
+```powershell
+Copy-Item silo_vault.db "silo_vault.db.bak_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+```
+
+The `.db` files are excluded from Git by `.gitignore`; keep at least one recent backup before any schema-modifying operation.
+
+---
 
 To contribute:
 1. Read [AGENTS.md](AGENTS.md) and the docs under [docs/](docs/).

@@ -54,6 +54,9 @@ htmlcov/
 *.db3
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
+*.db-journal
 *.sql.bak
 /data/
 /db/

@@ -3,15 +3,42 @@
 Initializes the FastAPI application, attaches the versioned API router, and
 exposes the automatic OpenAPI documentation at `/docs`.
 
-This is a structural skeleton. Only the `/api/v1/health` endpoint is currently
-functional. All other routes are placeholder stubs marked with `TODO`.
+Database ownership
+-------------------
+The application does **not** run ``Base.metadata.create_all()`` at startup.
+Schema versioning is owned by Alembic — migrations are explicit, reviewed
+scripts committed to ``alembic/versions/``. On startup, :func:`init_db`
+(renamed to :func:`check_database_migrated`) verifies that the database has
+been migrated; if the ``alembic_version`` table is absent, the process fails
+fast with a clear instruction to run ``alembic upgrade head``.
+
+Never edit or delete the migration scripts without first reviewing their
+impact on existing user data.
 """
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.v1.router import api_router
 from backend.config import settings
+from backend.database import check_database_migrated
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: gate the database on its migration state.
+
+    This intentionally does **not** call ``Base.metadata.create_all()``.
+    Schema changes are applied exclusively through Alembic migration scripts.
+    If the database has never been migrated (no ``alembic_version`` table),
+    startup fails with an actionable error message telling the operator to
+    run ``alembic upgrade head`` first.
+    """
+    check_database_migrated()
+    yield
+
 
 app = FastAPI(
     title=settings.app_name,
@@ -20,6 +47,7 @@ app = FastAPI(
         "SiloVault local backend API. Privacy-focused, AI-powered cloud file "
         "management. See `/docs` for the interactive OpenAPI specification."
     ),
+    lifespan=lifespan,
 )
 
 # Development CORS: allow frontend (localhost:3000) to call backend (127.0.0.1:8000)

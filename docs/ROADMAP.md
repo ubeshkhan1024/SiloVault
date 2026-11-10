@@ -34,7 +34,7 @@ flowchart TD
 ---
 
 ### Milestone 1 — Local Storage Foundation
-* **Status:** **PLANNED (First December Milestone)**
+* **Status:** **COMPLETE**
 * **Objective:** Build a robust, persistence-backed local foundation capable of tracking files, schemas, and operational history without cloud dependencies.
 * **Key Capabilities:**
   - SQLAlchemy models and SQLite database initialization (`silo_vault.db`).
@@ -42,6 +42,13 @@ flowchart TD
   - Safe local path resolution and traversal sanitization (preventing `../` attacks).
   - Real file registration and listing endpoints (`GET /api/v1/files`, `GET /api/v1/files/{file_id}`).
   - Dynamic file listing in the PWA frontend dashboard replacing placeholder text.
+* **Implemented so far (M1 tasks 1–7):**
+  - `UnifiedFileRecord` model, `backend/database.py` session management, and `silo_vault.db` initialization.
+  - Real file endpoints: `POST /api/v1/uploads`, `GET /api/v1/files`, `GET /api/v1/files/{file_id}`, `GET /api/v1/files/{file_id}/download`, `DELETE /api/v1/files/{file_id}` (quarantine-based safe deletion with rollback recovery).
+  - Frontend Files and Uploads views wired to the real backend (upload queue, drag-and-drop, download/delete actions).
+  - **Alembic** database migrations: baseline revision `b436c12118f9` for `unified_file_records`; existing development database stamped at baseline without data loss; explicit `alembic upgrade head` workflow (migrations are never run automatically on app startup).
+  - Test suite: 81 tests passing (1 platform-specific skip on Windows) covering database, uploads, files, downloads, deletion rollback, and Alembic migrations.
+* **Remaining for M1:** None — milestone complete.
 * **Dependencies & Prerequisites:** Phase 0 foundation skeleton.
 * **Deliverables:** `backend/database.py` session management, `backend/models/file.py`, `backend/schemas/file.py`, populated `/files` endpoints, updated dashboard view.
 * **Relevant Areas:**

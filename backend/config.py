@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # API version prefix.
     api_v1_prefix: str = "/api/v1"
 
+    # Local file upload settings.
+    uploads_dir: str = "uploads"
+    max_upload_size_bytes: int = 100 * 1024 * 1024  # 100 MiB
+
     # Placeholder for future cloud / AI configuration.
     # These are read from the environment but never committed as defaults.
     google_drive_client_id: str | None = None
