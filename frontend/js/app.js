@@ -10,6 +10,7 @@ import { initDashboard } from "./dashboard.js";
 import { initFilesView } from "./files.js";
 import { initUploadsView } from "./uploads.js";
 import { initSettingsView } from "./settings.js";
+import { initActivityView } from "./activity.js";
 
 /** Views that have already been initialized (prevents duplicate init). */
 const initializedViews = new Set();
@@ -19,10 +20,20 @@ const initializedViews = new Set();
  * @param {string} viewName - The target view identifier.
  */
 function ensureViewInitialized(viewName) {
-    // The Files view must always re-fetch when revisited so that newly
-    // uploaded or indexed records appear without a page reload.
+    // These views must always re-fetch when revisited so that newly-added
+    // records appear without a page reload.
     if (viewName === "files") {
         initFilesView();
+        return;
+    }
+
+    if (viewName === "activity") {
+        initActivityView();
+        return;
+    }
+
+    if (viewName === "dashboard") {
+        initDashboard();
         return;
     }
 
@@ -41,7 +52,7 @@ function ensureViewInitialized(viewName) {
             initSettingsView();
             break;
         default:
-            // "sync" and "activity" are static placeholders for now.
+            // "sync" is a static placeholder for now.
             break;
     }
 
@@ -56,6 +67,23 @@ document.addEventListener("DOMContentLoaded", () => {
             .then(() => console.log("Service worker registered."))
             .catch((err) => console.warn("Service worker registration failed:", err));
     }
+
+    // ── Stale-cache detection ────────────────────────────────────────────────
+    // Reads the cache-version declared in index.html and compares it against
+    // the version stored by the last successful SW install (in localStorage).
+    // If they differ, another tab has updated the shell — force a full reload
+    // so this tab picks up the new cache instead of serving stale JS/CSS.
+    const expectedVersion =
+        document.querySelector('meta[name="sv-cache-version"]')?.content;
+    const cachedVersion = localStorage.getItem("silovault-cache-version");
+    if (expectedVersion && cachedVersion !== expectedVersion) {
+        localStorage.setItem("silovault-cache-version", expectedVersion);
+        window.location.reload();
+    } else if (expectedVersion) {
+        // First load or version already matches — record it.
+        localStorage.setItem("silovault-cache-version", expectedVersion);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Initialize navigation handlers.
     initNavigation();

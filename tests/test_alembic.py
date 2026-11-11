@@ -36,6 +36,23 @@ EXPECTED_COLUMNS = {
     "provider_metadata",
 }
 
+EXPECTED_ACTIVITY_COLUMNS = {
+    "id",
+    "action_type",
+    "file_id",
+    "file_name",
+    "provider",
+    "status",
+    "timestamp",
+    "details",
+}
+
+EXPECTED_ACTIVITY_INDICES = {
+    "ix_activity_records_action_type",
+    "ix_activity_records_provider",
+    "ix_activity_records_timestamp",
+}
+
 EXPECTED_INDICES = {
     "ix_name_path",
     "ix_provider_account",
@@ -143,9 +160,10 @@ def test_fresh_db_upgrades_to_head(temp_db):
         with engine.connect() as conn:
             tables = _table_names(conn)
             assert "unified_file_records" in tables
+            assert "activity_records" in tables
             assert "alembic_version" in tables
             rev = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-            assert rev == "b436c12118f9"
+            assert rev == "4ef0d0cc89e5"
     finally:
         engine.dispose()
 
@@ -166,6 +184,17 @@ def test_schema_matches_sqlalchemy_model_after_upgrade(temp_db):
             idx_names = {idx["name"] for idx in indexes}
             assert EXPECTED_INDICES.issubset(idx_names), (
                 f"Missing indexes: {EXPECTED_INDICES - idx_names}"
+            )
+
+            act_columns = _column_names(conn, "activity_records")
+            assert EXPECTED_ACTIVITY_COLUMNS == act_columns, (
+                f"Missing: {EXPECTED_ACTIVITY_COLUMNS - act_columns}; Extra: {act_columns - EXPECTED_ACTIVITY_COLUMNS}"
+            )
+
+            act_indexes = _index_info(conn, "activity_records")
+            act_idx_names = {idx["name"] for idx in act_indexes}
+            assert EXPECTED_ACTIVITY_INDICES.issubset(act_idx_names), (
+                f"Missing activity indexes: {EXPECTED_ACTIVITY_INDICES - act_idx_names}"
             )
 
             # Verify partial unique index exists.
@@ -315,6 +344,7 @@ def test_downgrade_restores_original_data_on_re_upgrade(temp_db):
         with engine_check.connect() as conn:
             tables = _table_names(conn)
             assert "unified_file_records" in tables
+            assert "activity_records" in tables
             assert "alembic_version" in tables
             columns = _column_names(conn, "unified_file_records")
             assert EXPECTED_COLUMNS == columns

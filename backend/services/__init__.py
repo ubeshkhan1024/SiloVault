@@ -1,6 +1,22 @@
 """Business logic services.
 
-PLACEHOLDER — No concrete service implementations exist yet.
+Concrete service modules live alongside this package. They are imported and
+re-exported here so that the services package is the single import target for
+endpoint code and tests.
 """
 
-__all__: list[str] = []
+from backend.services.activity import (
+    ACTION_DELETE,
+    ACTION_DOWNLOAD,
+    ACTION_UPLOAD,
+    STATUS_SUCCESS,
+    record_activity,
+)
+
+__all__: list[str] = [
+    "ACTION_DELETE",
+    "ACTION_DOWNLOAD",
+    "ACTION_UPLOAD",
+    "STATUS_SUCCESS",
+    "record_activity",
+]

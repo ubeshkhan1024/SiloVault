@@ -16,6 +16,7 @@ from backend.config import settings
 from backend.database import get_db
 from backend.models.unified_file import UnifiedFileRecord
 from backend.schemas import FileMetadata
+from backend.services.activity import ACTION_UPLOAD, record_activity
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
@@ -137,6 +138,29 @@ async def create_upload(
             status_code=500,
             detail="Failed to register file metadata; uploaded file cleaned up.",
         )
+
+    # --- Activity recording: only after the file and DB record are committed.
+    # A failed operation never reaches this point, so no misleading success
+    # record is written.
+    try:
+        record_activity(
+            db,
+            ACTION_UPLOAD,
+            file_name=original_name,
+            provider="LOCAL",
+            file_id=record.id,
+            details={
+                "mime_type": mime_type,
+                "size_bytes": total_size,
+                "sha256": sha256_hex,
+                "storage_filename": storage_filename,
+            },
+        )
+    except Exception:
+        # Activity logging is best-effort and must never break the upload
+        # response that has already succeeded. Roll back only the activity
+        # session state; the file record remains committed.
+        db.rollback()
 
     return FileMetadata.model_validate(record)
 

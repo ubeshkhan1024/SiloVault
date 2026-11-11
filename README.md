@@ -2,7 +2,7 @@
 
 > A privacy-focused, AI-powered unified cloud storage management platform.
 
-**Status:** Milestone 1 (Local Storage Foundation) complete. SQLite database with Alembic migrations, unified file metadata model, real CRUD endpoints (`POST /uploads`, `GET /files`, `GET /files/{id}`, `GET /files/{id}/download`, `DELETE /files/{id}`), and frontend Files/Uploads views wired to backend. Cloud provider adapters, AI pipeline, mobile uploader, and approval queue remain planned for future milestones.
+**Status:** Milestone 1 (Local Storage Foundation) complete. SQLite database with Alembic migrations, unified file metadata model, real CRUD endpoints (`POST /uploads`, `GET /files`, `GET /files/{id}`, `GET /files/{id}/download`, `DELETE /files/{id}`), **Activity History** (`GET /api/v1/activity`) recording every successful upload, download, and delete, and frontend Files/Uploads/Dashboard/Activity views wired to the backend. Cloud provider adapters, AI pipeline, mobile uploader, approval queue, and cross-provider sync remain planned for future milestones.
 
 ## What SiloVault is
 
@@ -58,7 +58,7 @@ SiloVault/
 ├── frontend/            # PWA shell
 │   ├── index.html       # Main HTML with 6 views
 │   ├── css/style.css    # Styling
-│   ├── js/              # ES modules (app, api, dashboard, files, uploads, settings)
+│   ├── js/              # ES modules (app, api, dashboard, files, uploads, activity, settings)
 │   ├── manifest.json    # PWA manifest
 │   └── service-worker.js # Offline shell caching
 ├── docs/                # Project documentation
@@ -120,7 +120,7 @@ npx serve frontend -l 3000
 **Testing:**
 ```bash
 pytest tests/
-# 81 tests pass (1 skipped on Windows for platform-specific symlink check)
+# 93 tests pass (1 skipped on Windows for platform-specific symlink check)
 ```
 
 ## Database migrations (Alembic)

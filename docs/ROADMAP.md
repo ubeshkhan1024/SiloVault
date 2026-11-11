@@ -5,7 +5,7 @@ This document defines the proposed multi-phase development roadmap for **SiloVau
 For overall scope and terminology, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For structural design, see [ARCHITECTURE.md](ARCHITECTURE.md). For data movement, see [DATA_FLOW.md](DATA_FLOW.md). For security guidelines, see [SECURITY.md](SECURITY.md).
 
 > [!NOTE]
-> **Status:** This roadmap is a **Proposed Plan**. **Phase 0 (Foundation) is complete** — documentation, repository setup, and an application skeleton (FastAPI backend with 14 registered routes, PWA frontend shell with 6 views, test scaffolding with 6 tests) are in place. All non-health endpoints are placeholder stubs. Subsequent milestones are scheduled for implementation beginning in December 2026.
+> **Status:** This roadmap is a **Proposed Plan**. **Phase 0 (Foundation) is complete** — documentation, repository setup, and an application skeleton (FastAPI backend with routes, PWA frontend shell with 6 views, test scaffolding) are in place. All non-health endpoints are placeholder stubs. Subsequent milestones are scheduled for implementation beginning in December 2026.
 
 ---
 
@@ -42,12 +42,19 @@ flowchart TD
   - Safe local path resolution and traversal sanitization (preventing `../` attacks).
   - Real file registration and listing endpoints (`GET /api/v1/files`, `GET /api/v1/files/{file_id}`).
   - Dynamic file listing in the PWA frontend dashboard replacing placeholder text.
+  - **Activity History** (`GET /api/v1/activity`) recording every successful upload, download, and delete with paginated filtering and newest-first ordering.
+  - Overview "Recent Activity" panel wired to the activity API; dashboards and uploads refresh automatically after each operation.
 * **Implemented so far (M1 tasks 1–7):**
   - `UnifiedFileRecord` model, `backend/database.py` session management, and `silo_vault.db` initialization.
   - Real file endpoints: `POST /api/v1/uploads`, `GET /api/v1/files`, `GET /api/v1/files/{file_id}`, `GET /api/v1/files/{file_id}/download`, `DELETE /api/v1/files/{file_id}` (quarantine-based safe deletion with rollback recovery).
-  - Frontend Files and Uploads views wired to the real backend (upload queue, drag-and-drop, download/delete actions).
-  - **Alembic** database migrations: baseline revision `b436c12118f9` for `unified_file_records`; existing development database stamped at baseline without data loss; explicit `alembic upgrade head` workflow (migrations are never run automatically on app startup).
-  - Test suite: 81 tests passing (1 platform-specific skip on Windows) covering database, uploads, files, downloads, deletion rollback, and Alembic migrations.
+  - Activity History endpoint: `GET /api/v1/activity` (pagination, `action_type` filter, deterministic newest-first ordering via `timestamp DESC, id DESC`). Activity records are written for every successful upload, download, and delete; failed operations produce no record.
+  - Frontend Files, Uploads, Dashboard, and Activity views wired to the real backend (upload queue, drag-and-drop, download/delete actions, load-more pagination on the dedicated Activity page, automatic refresh of Recent Activity on the Overview after any operation).
+  - **Alembic** database migrations: baseline revision `b436c12118f9` for `unified_file_records`; activity revision `4ef0d0cc89e5` creating `activity_records` with three indexes (`timestamp`, `action_type`, `provider`); existing development database stamped at baseline without data loss; explicit `alembic upgrade head` workflow (migrations are never run automatically on app startup).
+  - Test suite: **93 tests passing (1 platform-specific skip on Windows)** covering database, uploads, files, downloads, deletion rollback, Alembic migrations (including the new activity table), and activity history behavior.
+* **Known limitations at M1 completion:**
+  - **Activity History rollback** (`POST /api/v1/activity/rollback/{id}`) is a **placeholder** — it returns a constant message. Reversible operations require provider adapters that do not yet exist.
+  - **Cloud provider integrations (Google Drive, OneDrive, Dropbox, Box, MEGA)** are **planned but not implemented**. The only operational storage today is local disk under the configured uploads directory.
+  - **AI processing (Ollama, OCR, tagging, classification)**, the **approval queue**, and **cross-provider sync** are all **planned for future milestones** and have no working implementation yet.
 * **Remaining for M1:** None — milestone complete.
 * **Dependencies & Prerequisites:** Phase 0 foundation skeleton.
 * **Deliverables:** `backend/database.py` session management, `backend/models/file.py`, `backend/schemas/file.py`, populated `/files` endpoints, updated dashboard view.

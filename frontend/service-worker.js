@@ -8,12 +8,32 @@
  * file synchronization. Those features are planned for future phases.
  */
 
-const CACHE_NAME = "silovault-shell-v1";
+/**
+ * Increment this value whenever frontend shell assets change.
+ * The new value drives a new CACHE_NAME, causing the activate handler to
+ * delete the old cache and fetch all assets afresh on the next page load.
+ *
+ * Do NOT reset this to 1 after a bump — monotonic increment only.
+ */
+const CACHE_VERSION = '2';
+
+const CACHE_NAME = `silovault-shell-v${CACHE_VERSION}`;
+
+/**
+ * Shell assets to cache on install.  Includes every statically-served
+ * client-side file so that a single CACHE_VERSION bump invalidates them all
+ * atomically — no partial staleness between JS modules.
+ */
 const SHELL_ASSETS = [
     "./index.html",
     "./css/style.css",
     "./js/app.js",
     "./js/api.js",
+    "./js/dashboard.js",
+    "./js/activity.js",
+    "./js/files.js",
+    "./js/uploads.js",
+    "./js/settings.js",
     "./manifest.json",
 ];
 
@@ -23,17 +43,27 @@ self.addEventListener("install", (event) => {
             return cache.addAll(SHELL_ASSETS);
         })
     );
+    // New worker takes control immediately — no waiting for existing tabs
+    // to close before it starts serving requests.
     self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
     event.waitUntil(
         caches.keys().then((keys) => {
+            // Delete every cache whose name does not match the CURRENT version.
+            // This is safe: only shell assets are stored in Cache API — user
+            // data (database, uploaded files) lives on the filesystem and is
+            // unaffected.
             return Promise.all(
-                keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+                keys
+                    .filter((key) => key !== CACHE_NAME)
+                    .map((key) => caches.delete(key))
             );
         })
     );
+    // Claim all controlled pages so the new cache is used immediately
+    // without requiring the user to navigate away and back.
     self.clients.claim();
 });
 

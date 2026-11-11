@@ -19,6 +19,11 @@ from backend.config import settings
 from backend.database import get_db
 from backend.models.unified_file import UnifiedFileRecord
 from backend.schemas import FileListResponse, FileMetadata
+from backend.services.activity import (
+    ACTION_DELETE,
+    ACTION_DOWNLOAD,
+    record_activity,
+)
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -162,6 +167,21 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
     # any newline/carriage-return characters that could inject headers.
     safe_filename = "".join(ch for ch in record.name if ch not in "\r\n") or "download"
 
+    # --- Activity recording: recorded when the download response is
+    # successfully initiated. We do NOT claim the user completed the download;
+    # this records that the server successfully served the file.
+    try:
+        record_activity(
+            db,
+            ACTION_DOWNLOAD,
+            file_name=record.name,
+            provider=record.provider,
+            file_id=record.id,
+            details={"mime_type": mime_type, "size_bytes": record.size_bytes},
+        )
+    except Exception:
+        db.rollback()
+
     return FileResponse(
         path=str(safe_path),
         filename=safe_filename,
@@ -208,6 +228,12 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
                 f"Provider '{record.provider}' is not eligible."
             ),
         )
+
+    # Snapshot the original filename BEFORE the DB record is removed. The
+    # delete activity must remain identifiable even after the file record is
+    # gone, so we keep this snapshot rather than a foreign key.
+    deleted_file_name = record.name
+    deleted_provider = record.provider
 
     uploads_dir = _resolve_uploads_dir()
     safe_path = _safe_download_path(uploads_dir, record.provider_file_id)
@@ -289,5 +315,21 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
         logging.warning(
             "delete_file: failed to remove quarantine file %s", quar_path
         )
+
+    # --- Activity recording: only after the deletion operation succeeds and
+    # the file record has been removed. ``file_id`` is intentionally NULL so
+    # the activity outlives the file record; ``file_name`` is the snapshot
+    # taken before deletion.
+    try:
+        record_activity(
+            db,
+            ACTION_DELETE,
+            file_name=deleted_file_name,
+            provider=deleted_provider,
+            file_id=None,
+            details={"storage_filename": record.provider_file_id},
+        )
+    except Exception:
+        db.rollback()
 
     return None  # 204 No Content

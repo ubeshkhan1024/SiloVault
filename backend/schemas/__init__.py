@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FileMetadata(BaseModel):
@@ -32,8 +32,7 @@ class FileMetadata(BaseModel):
         None, description="Provider-specific metadata"
     )
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FileListResponse(BaseModel):
@@ -45,4 +44,37 @@ class FileListResponse(BaseModel):
     offset: int
 
 
-__all__: list[str] = ["FileMetadata", "FileListResponse"]
+# ---------------------------------------------------------------------------
+# Activity schemas
+# ---------------------------------------------------------------------------
+
+class ActivityRecordSchema(BaseModel):
+    """Single activity / audit-log entry."""
+
+    id: str = Field(..., description="Internal UUID primary key (act_<UUID>)")
+    action_type: str = Field(..., description="Operation kind: UPLOAD, DOWNLOAD, DELETE")
+    file_id: Optional[str] = Field(None, description="Unified file ID (NULL after DELETE)")
+    file_name: str = Field(..., description="Snapshot of the original filename")
+    provider: str = Field(..., description="Storage provider the operation targeted")
+    status: str = Field(..., description="Operation status")
+    timestamp: datetime = Field(..., description="Operation timestamp (UTC, timezone-aware)")
+    details: Optional[Dict[str, Any]] = Field(None, description="Optional free-form context")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ActivityListResponse(BaseModel):
+    """Paginated activity list response."""
+
+    items: List[ActivityRecordSchema]
+    total: int
+    limit: int
+    offset: int
+
+
+__all__: list[str] = [
+    "FileMetadata",
+    "FileListResponse",
+    "ActivityRecordSchema",
+    "ActivityListResponse",
+]

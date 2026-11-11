@@ -16,6 +16,7 @@ When adding a new model module under ``backend/models/``:
 3. Add the class name to ``__all__``.
 """
 
+from backend.models.activity import ActivityRecord
 from backend.models.unified_file import UnifiedFileRecord
 
-__all__: list[str] = ["UnifiedFileRecord"]
+__all__: list[str] = ["ActivityRecord", "UnifiedFileRecord"]

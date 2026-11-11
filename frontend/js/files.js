@@ -190,6 +190,11 @@ async function handleDownload(file, btn) {
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(objectUrl);
+
+        // Refresh the dashboard Recent Activity panel so the download appears there.
+        if (typeof window !== "undefined") {
+            import("./dashboard.js").then((mod) => mod.refreshRecentActivity()).catch(() => {});
+        }
     } catch (error) {
         console.error(`Download failed for "${file.name}":`, error);
         if (btn) {
@@ -257,8 +262,11 @@ async function handleDelete(file, btn) {
             if (row) {
                 row.remove();
             }
-            // Refresh the list to stay consistent with server state.
+            // Refresh both the Files list and the Dashboard Recent Activity panel.
             initFilesView();
+            if (typeof window !== "undefined") {
+                import("./dashboard.js").then((mod) => mod.refreshRecentActivity()).catch(() => {});
+            }
         }
     } catch (error) {
         console.error(`Delete request failed for "${file.name}":`, error);

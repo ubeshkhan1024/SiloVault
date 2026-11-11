@@ -100,15 +100,13 @@ async function processSelectedFiles(files, container) {
 
     _isUploading = false;
 
-    // Re-trigger the Files view refresh so newly uploaded records appear.
-    // We dispatch a custom event that app.js can listen for, but since
-    // initFilesView() is already exported we call it directly here.
+    // Refresh both the Files list and the Dashboard Recent Activity panel.
     if (typeof window !== "undefined") {
-        // Lazy-import to avoid circular init issues; caller owns ensureViewInitialized.
-        import("./files.js").then((mod) => {
-            mod.initFilesView();
-        }).catch(() => {
-            // Files view refresh failure is non-fatal.
+        Promise.all([
+            import("./files.js").then((mod) => mod.initFilesView()),
+            import("./dashboard.js").then((mod) => mod.refreshRecentActivity()),
+        ]).catch(() => {
+            // Refresh failures are non-fatal; the user can navigate manually.
         });
     }
 }

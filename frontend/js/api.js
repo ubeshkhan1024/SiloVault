@@ -70,8 +70,15 @@ export const SiloVaultAPI = {
         return this.request("/approvals/pending");
     },
 
-    async listActivity() {
-        return this.request("/activity");
+    async listActivity(actionType = "", limit = 50, offset = 0) {
+        const params = new URLSearchParams({
+            limit: String(limit),
+            offset: String(offset),
+        });
+        if (actionType) {
+            params.set("action_type", actionType);
+        }
+        return this.request(`/activity?${params.toString()}`);
     },
 
     /**
