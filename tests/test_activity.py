@@ -36,6 +36,9 @@ from backend.services.activity import (
     STATUS_SUCCESS,
     record_activity,
 )
+from backend.storage.local import LocalAdapter
+from backend.storage.registry import register, remove
+from backend.storage.capabilities import CAPABILITY_MAP
 
 
 @pytest.fixture
@@ -67,6 +70,11 @@ def activity_env(tmp_path, monkeypatch):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # Register LOCAL adapter with the temp uploads directory
+    adapter = LocalAdapter(str(uploads_dir))
+    register("LOCAL", adapter, CAPABILITY_MAP["LOCAL"])
+
     try:
         yield {
             "client": TestClient(app),
@@ -74,6 +82,8 @@ def activity_env(tmp_path, monkeypatch):
             "uploads_dir": uploads_dir,
         }
     finally:
+        # Clean up adapter registration
+        remove("LOCAL")
         app.dependency_overrides.clear()
         engine.dispose()
 

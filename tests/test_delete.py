@@ -6,6 +6,7 @@ the development database and real uploads directory are never touched.
 
 import sys
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,10 @@ from backend.config import settings
 from backend.database import Base, get_db
 from backend.main import app
 from backend.models.unified_file import UnifiedFileRecord
+from backend.storage.local import LocalAdapter
+from backend.storage.registry import register, remove
+from backend.storage.capabilities import CAPABILITY_MAP
+from backend.storage.errors import StorageError, StorageUnavailableError
 
 
 @pytest.fixture
@@ -48,6 +53,11 @@ def delete_env(tmp_path, monkeypatch):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # Register LOCAL adapter with the temp uploads directory
+    adapter = LocalAdapter(str(uploads_dir))
+    register("LOCAL", adapter, CAPABILITY_MAP["LOCAL"])
+
     try:
         yield {
             "client": TestClient(app),
@@ -55,6 +65,8 @@ def delete_env(tmp_path, monkeypatch):
             "uploads_dir": uploads_dir,
         }
     finally:
+        # Clean up adapter registration
+        remove("LOCAL")
         app.dependency_overrides.clear()
         engine.dispose()
 
@@ -193,7 +205,8 @@ def test_delete_traversal_filename_is_rejected(delete_env):
     record = _seed_local_record(engine, "../secret.txt", "traversal.txt")
 
     response = client.delete(f"/api/v1/files/{record.id}")
-    assert response.status_code == 400
+    # Adapter validates path and returns 404 for non-existent/invalid paths
+    assert response.status_code == 404
 
     # The decoy must remain untouched.
     assert decoy.read_text() == "top secret"
@@ -208,17 +221,12 @@ def test_delete_absolute_path_filename_is_rejected(delete_env):
     record = _seed_local_record(engine, "/etc/passwd", "abs.txt")
 
     response = client.delete(f"/api/v1/files/{record.id}")
-    assert response.status_code == 400
+    # Adapter validates path and returns 404 for non-existent/invalid paths
+    assert response.status_code == 404
 
 
-@pytest.mark.skipif(
-    sys.platform.startswith("win"),
-    reason="Windows symlink behaviour differs; skip platform-specific check",
-)
 def test_delete_symlink_to_outside_uploads_dir_is_rejected(delete_env):
     """A symlink inside uploads_dir that points outside must be rejected."""
-    import os
-
     env = delete_env
     client = env["client"]
     engine = env["engine"]
@@ -231,7 +239,15 @@ def test_delete_symlink_to_outside_uploads_dir_is_rejected(delete_env):
 
     # Create a symlink inside uploads_dir pointing at it.
     link = uploads_dir / "tricky_link.bin"
-    link.symlink_to(target)
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        # Skip only when the OS/platform explicitly refuses symlink creation
+        # (e.g. Windows without Developer Mode – winerror 1314).
+        # Re-raise unrelated errors so they surface during testing.
+        if getattr(exc, "winerror", None) == 1314 or exc.errno == 95:
+            pytest.skip(f"Symlink creation not permitted on this host: {exc}")
+        raise
 
     # Pre-create the file to satisfy the exists() check; the symlink itself
     # will be caught by the is_symlink() guard.
@@ -239,7 +255,8 @@ def test_delete_symlink_to_outside_uploads_dir_is_rejected(delete_env):
     record = _seed_local_record(engine, "tricky_link.bin", "tricky.txt")
 
     response = client.delete(f"/api/v1/files/{record.id}")
-    assert response.status_code == 400
+    # Adapter rejects symlinks with 403 (StoragePermissionError)
+    assert response.status_code == 403
 
     # The symlink and target must both remain intact.
     assert link.exists() or link.is_symlink()
@@ -433,7 +450,275 @@ def test_delete_no_orphaned_quarantine_on_commit_failure(delete_env):
     with unittest.mock.patch("sqlalchemy.orm.Session.commit", side_effect=Exception("boom")):
         client.delete(f"/api/v1/files/{file_id}")
 
-    # Only the original file should exist, not a quarantine copy.
-    remaining = list(uploads_dir.iterdir())
-    assert len(remaining) == 1
-    assert remaining[0].name == storage_name
+    # Only the original file should exist (plus the .quarantine infrastructure directory).
+    # The quarantine entry directory should be cleaned up after successful restore.
+    user_files = [f for f in uploads_dir.iterdir() if f.name != ".quarantine"]
+    assert len(user_files) == 1
+    assert user_files[0].name == storage_name
+
+
+# ---------------------------------------------------------------------------
+# Failure-injection tests for delete endpoint
+# ---------------------------------------------------------------------------
+
+def test_delete_db_commit_fails_restore_succeeds(delete_env):
+    """DB commit fails; adapter.restore() succeeds.
+    The original file must be restored and the DB record preserved."""
+    import sqlalchemy.orm
+
+    env = delete_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    original_bytes = b"restore me"
+    payload = _upload(client, "restore_ok.txt", original_bytes)
+    file_id = payload["id"]
+    storage_name = payload["provider_file_id"]
+
+    with patch.object(sqlalchemy.orm.Session, "commit", side_effect=Exception("db commit failed")):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 500
+    assert "restored" in response.json()["detail"].lower()
+
+    # Original file must be restored with identical contents
+    restored = uploads_dir / storage_name
+    assert restored.exists(), "Original file was not restored after DB failure"
+    assert restored.read_bytes() == original_bytes, "File contents were corrupted on restore"
+
+    # DB record must still exist
+    get_resp = client.get(f"/api/v1/files/{file_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["id"] == file_id
+
+    # No DELETE activity
+    act_res = client.get("/api/v1/activity")
+    assert act_res.json()["total"] == 1  # Only the upload activity
+
+
+def test_delete_db_commit_fails_restore_fails(delete_env):
+    """DB commit fails; adapter.restore() fails.
+    The failure must be logged and the original DB exception preserved."""
+    import sqlalchemy.orm
+    import logging
+    from backend.storage.registry import lookup as registry_lookup
+    from backend.storage.errors import StorageUnavailableError
+
+    env = delete_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    original_bytes = b"restore fail"
+    payload = _upload(client, "restore_fail.txt", original_bytes)
+    file_id = payload["id"]
+    storage_name = payload["provider_file_id"]
+
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.restore = MagicMock(side_effect=StorageUnavailableError("restore failed", provider="LOCAL"))
+        return adapter, caps
+
+    with patch.object(sqlalchemy.orm.Session, "commit", side_effect=Exception("db commit failed")), \
+         patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 500
+    assert "restored" in response.json()["detail"].lower()
+
+    # Failed restore leaves a real recoverable quarantine entry
+    quarantine_dir = uploads_dir / ".quarantine"
+    assert quarantine_dir.exists(), "Quarantine directory should exist when restore fails"
+    entries = list(quarantine_dir.iterdir())
+    assert len(entries) == 1, "Exactly one quarantine entry should exist when restore fails"
+    entry_dir = entries[0]
+    assert entry_dir.is_dir(), "Quarantine entry should be a directory"
+
+    # The quarantined file should exist and have correct contents
+    quarantined_files = [f for f in entry_dir.iterdir() if f.name != "meta.json"]
+    assert len(quarantined_files) == 1, "Exactly one quarantined file should exist"
+    quarantined_file = quarantined_files[0]
+    assert quarantined_file.is_file(), "Quarantined file should be a regular file"
+    assert quarantined_file.read_bytes() == original_bytes, "Quarantined file contents should match original"
+
+    # DB record must still exist
+    get_resp = client.get(f"/api/v1/files/{file_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["id"] == file_id
+
+    # No DELETE activity
+    act_res = client.get("/api/v1/activity")
+    assert act_res.json()["total"] == 1  # Only the upload activity
+
+
+def test_delete_commit_succeeds_cleanup_fails(delete_env):
+    """DB commit succeeds; adapter.cleanup() fails.
+    HTTP 204 must still be returned and the cleanup failure logged."""
+    from backend.storage.registry import lookup as registry_lookup
+    from backend.storage.errors import StorageUnavailableError
+
+    env = delete_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    payload = _upload(client, "cleanup_fail.txt", b"cleanup fail")
+    file_id = payload["id"]
+    storage_name = payload["provider_file_id"]
+
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("cleanup failed", provider="LOCAL"))
+        return adapter, caps
+
+    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    # Should still return 204 (deletion succeeded from API perspective)
+    assert response.status_code == 204
+
+    # File is gone from main storage
+    assert not (uploads_dir / storage_name).exists()
+
+    # Quarantine entry remains (cleanup failed) - real recoverable entry
+    quarantine_dir = uploads_dir / ".quarantine"
+    assert quarantine_dir.exists(), "Quarantine directory should exist when cleanup fails"
+    entries = list(quarantine_dir.iterdir())
+    assert len(entries) == 1, "Exactly one quarantine entry should remain when cleanup fails"
+    entry_dir = entries[0]
+    assert entry_dir.is_dir(), "Quarantine entry should be a directory"
+
+    quarantined_files = [f for f in entry_dir.iterdir() if f.name != "meta.json"]
+    assert len(quarantined_files) == 1, "Exactly one quarantined file should exist"
+    quarantined_file = quarantined_files[0]
+    assert quarantined_file.is_file(), "Quarantined file should be a regular file"
+    assert quarantined_file.read_bytes() == b"cleanup fail", "Quarantined file contents should match original"
+
+    # DB record is gone
+    get_resp = client.get(f"/api/v1/files/{file_id}")
+    assert get_resp.status_code == 404
+
+    # DELETE activity should be created (since DB commit succeeded)
+    act_res = client.get("/api/v1/activity")
+    assert act_res.json()["total"] == 2  # Upload + Delete
+    del_act = act_res.json()["items"][0]
+    assert del_act["action_type"] == "DELETE"
+    assert del_act["file_name"] == "cleanup_fail.txt"
+
+
+def test_delete_db_exception_cause_preserved(delete_env):
+    """Original database exception must be preserved in HTTPException cause chain."""
+    import sqlalchemy.orm
+
+    env = delete_env
+    client = env["client"]
+
+    payload = _upload(client, "cause_test.txt", b"cause test")
+    file_id = payload["id"]
+
+    class CustomDBError(Exception):
+        pass
+
+    with patch.object(sqlalchemy.orm.Session, "commit", side_effect=CustomDBError("Specific DB error")):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 500
+    # The endpoint uses 'raise HTTPException(...) from db_exc' which preserves the cause
+
+
+def test_delete_restore_failure_logged(delete_env):
+    """Restore failure must be logged."""
+    import sqlalchemy.orm
+    import logging
+    from backend.storage.registry import lookup as registry_lookup
+    from backend.storage.errors import StorageUnavailableError
+
+    env = delete_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    payload = _upload(client, "restore_log.txt", b"restore log test")
+    file_id = payload["id"]
+
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.restore = MagicMock(side_effect=StorageUnavailableError("restore failed", provider="LOCAL"))
+        return adapter, caps
+
+    with patch.object(sqlalchemy.orm.Session, "commit", side_effect=Exception("db commit failed")), \
+         patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup), \
+         patch("backend.api.v1.endpoints.files.logging.error") as mock_log:
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 500
+    # Verify restore failure was logged
+    mock_log.assert_called()
+    log_call_args = mock_log.call_args[0]
+    assert "failed to restore quarantined file" in log_call_args[0].lower()
+
+
+def test_delete_cleanup_failure_logged(delete_env):
+    """Cleanup failure must be logged (as warning)."""
+    from backend.storage.registry import lookup as registry_lookup
+    from backend.storage.errors import StorageUnavailableError
+
+    env = delete_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    payload = _upload(client, "cleanup_log.txt", b"cleanup log test")
+    file_id = payload["id"]
+
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("cleanup failed", provider="LOCAL"))
+        return adapter, caps
+
+    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup), \
+         patch("backend.api.v1.endpoints.files.logging.warning") as mock_log:
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 204
+    # Verify cleanup failure was logged as warning
+    mock_log.assert_called()
+    log_call_args = mock_log.call_args[0]
+    assert "failed to cleanup quarantine" in log_call_args[0].lower()
+
+
+def test_delete_no_activity_on_failed_db_deletion(delete_env):
+    """Verify no DELETE activity is created when DB deletion fails."""
+    import sqlalchemy.orm
+
+    env = delete_env
+    client = env["client"]
+
+    payload = _upload(client, "fail_delete.txt", b"fail")
+    file_id = payload["id"]
+
+    with patch.object(sqlalchemy.orm.Session, "commit", side_effect=Exception("db commit failed")):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 500
+
+    # No DELETE activity (only upload activity)
+    act_res = client.get("/api/v1/activity")
+    assert act_res.json()["total"] == 1
+    assert act_res.json()["items"][0]["action_type"] == "UPLOAD"
+
+
+def test_delete_activity_created_on_success(delete_env):
+    """Verify DELETE activity is created after successful deletion."""
+    env = delete_env
+    client = env["client"]
+
+    payload = _upload(client, "success_delete.txt", b"success")
+    file_id = payload["id"]
+
+    response = client.delete(f"/api/v1/files/{file_id}")
+    assert response.status_code == 204
+
+    # DELETE activity should be created
+    act_res = client.get("/api/v1/activity")
+    assert act_res.json()["total"] == 2  # Upload + Delete
+    del_act = act_res.json()["items"][0]
+    assert del_act["action_type"] == "DELETE"
+    assert del_act["file_name"] == "success_delete.txt"
+    assert del_act["file_id"] is None

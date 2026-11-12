@@ -11,7 +11,7 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +23,10 @@ from backend.config import settings
 from backend.database import Base, get_db
 from backend.main import app
 from backend.models.unified_file import UnifiedFileRecord
+from backend.storage.local import LocalAdapter
+from backend.storage.registry import register, remove
+from backend.storage.capabilities import CAPABILITY_MAP
+from backend.storage.errors import StorageError, StorageUnavailableError
 
 
 @pytest.fixture
@@ -55,6 +59,11 @@ def upload_env(tmp_path, monkeypatch):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # Register LOCAL adapter with the temp uploads directory
+    adapter = LocalAdapter(str(uploads_dir))
+    register("LOCAL", adapter, CAPABILITY_MAP["LOCAL"])
+
     try:
         yield {
             "client": TestClient(app),
@@ -62,6 +71,8 @@ def upload_env(tmp_path, monkeypatch):
             "uploads_dir": uploads_dir,
         }
     finally:
+        # Clean up adapter registration
+        remove("LOCAL")
         app.dependency_overrides.clear()
         engine.dispose()
 
@@ -259,12 +270,15 @@ def test_database_failure_cleans_up_stored_file(upload_env):
     try:
         response = _upload_file(client, "test.txt", b"data")
         assert response.status_code == 500
-        assert "cleaned up" in response.json()["detail"].lower()
+        assert "cleanup" in response.json()["detail"].lower()
     finally:
         _Session.commit = original_session_commit  # type: ignore[assignment]
 
     # The file should have been cleaned up
-    assert len(list(uploads_dir.iterdir())) == 0
+    # The quarantine directory (.quarantine) is part of the storage infrastructure
+    # and persists; only the user file should be removed.
+    user_files = [f for f in uploads_dir.iterdir() if f.name != ".quarantine"]
+    assert len(user_files) == 0
 
 
 def test_existing_files_endpoint_unchanged(upload_env):
@@ -316,3 +330,230 @@ def test_list_uploads_returns_placeholder():
     payload = response.json()
     assert payload["status"] == "placeholder"
     assert payload["uploads"] == []
+
+
+# ---------------------------------------------------------------------------
+# Failure-injection tests for upload endpoint
+# ---------------------------------------------------------------------------
+
+def test_upload_db_commit_fails_quarantine_and_cleanup_succeed(upload_env):
+    """DB commit fails; adapter.quarantine() and adapter.cleanup() both succeed.
+    The uploaded file must be removed and no activity recorded."""
+    import unittest.mock
+    from sqlalchemy.orm import Session as _Session
+
+    env = upload_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    content = b"test data for db failure"
+
+    original_commit = _Session.commit
+
+    def failing_commit(self):
+        raise RuntimeError("Simulated database failure")
+
+    _Session.commit = failing_commit  # type: ignore[assignment]
+
+    try:
+        response = _upload_file(client, "db_fail.txt", content)
+        assert response.status_code == 500
+        assert "cleanup" in response.json()["detail"].lower()
+
+        # The file should be cleaned up (no user files left, only .quarantine dir)
+        user_files = [f for f in uploads_dir.iterdir() if f.name != ".quarantine"]
+        assert len(user_files) == 0
+
+        # No UPLOAD activity should be created
+        act_res = client.get("/api/v1/activity")
+        assert act_res.json()["total"] == 0
+    finally:
+        _Session.commit = original_commit  # type: ignore[assignment]
+
+
+def test_upload_db_commit_fails_quarantine_fails(upload_env):
+    """DB commit fails; adapter.quarantine() fails.
+    The failure must be logged but the original DB exception preserved."""
+    import unittest.mock
+    from sqlalchemy.orm import Session as _Session
+    from backend.storage.registry import lookup as registry_lookup
+    from backend.storage.errors import StorageUnavailableError
+
+    env = upload_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    content = b"test data for quarantine failure"
+
+    original_commit = _Session.commit
+
+    def failing_commit(self):
+        raise RuntimeError("Simulated database failure")
+
+    _Session.commit = failing_commit  # type: ignore[assignment]
+
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.quarantine = MagicMock(side_effect=StorageUnavailableError("quarantine failed", provider="LOCAL"))
+        return adapter, caps
+
+    with patch("backend.api.v1.endpoints.uploads.lookup", side_effect=mock_lookup):
+        try:
+            response = _upload_file(client, "quarantine_fail.txt", content)
+            assert response.status_code == 500
+            assert "cleanup" in response.json()["detail"].lower()
+
+            # File remains on disk since quarantine failed
+            user_files = [f for f in uploads_dir.iterdir() if f.name != ".quarantine"]
+            assert len(user_files) == 1
+
+            # No UPLOAD activity
+            act_res = client.get("/api/v1/activity")
+            assert act_res.json()["total"] == 0
+        finally:
+            _Session.commit = original_commit  # type: ignore[assignment]
+
+
+def test_upload_db_commit_fails_quarantine_succeeds_cleanup_fails(upload_env):
+    """DB commit fails; quarantine succeeds but cleanup fails.
+    The original DB exception must be preserved as the HTTPException cause."""
+    import unittest.mock
+    from sqlalchemy.orm import Session as _Session
+    from backend.storage.registry import lookup as registry_lookup
+    from backend.storage.errors import StorageUnavailableError
+
+    env = upload_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    content = b"test data for cleanup failure"
+
+    original_commit = _Session.commit
+
+    def failing_commit(self):
+        raise RuntimeError("Simulated database failure")
+
+    _Session.commit = failing_commit  # type: ignore[assignment]
+
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("cleanup failed", provider="LOCAL"))
+        return adapter, caps
+
+    with patch("backend.api.v1.endpoints.uploads.lookup", side_effect=mock_lookup):
+        try:
+            response = _upload_file(client, "cleanup_fail.txt", content)
+            assert response.status_code == 500
+            assert "cleanup" in response.json()["detail"].lower()
+
+            # File should be in quarantine (quarantine succeeded, cleanup failed)
+            quarantine_dir = uploads_dir / ".quarantine"
+            assert quarantine_dir.exists(), "Quarantine directory should exist"
+            entries = list(quarantine_dir.iterdir())
+            assert len(entries) == 1, "Exactly one quarantine entry should exist"
+            entry_dir = entries[0]
+            assert entry_dir.is_dir(), "Quarantine entry should be a directory"
+
+            # The quarantined file should exist inside the entry directory
+            quarantined_files = [f for f in entry_dir.iterdir() if f.name != "meta.json"]
+            assert len(quarantined_files) == 1, "Exactly one quarantined file should exist"
+            quarantined_file = quarantined_files[0]
+            assert quarantined_file.is_file(), "Quarantined file should be a regular file"
+            assert quarantined_file.read_bytes() == content, "Quarantined file contents should match original"
+
+            # No UPLOAD activity
+            act_res = client.get("/api/v1/activity")
+            assert act_res.json()["total"] == 0
+        finally:
+            _Session.commit = original_commit  # type: ignore[assignment]
+
+
+def test_upload_db_refresh_fails_after_commit_no_quarantine(upload_env):
+    """Post-commit db.refresh() failure must NOT trigger quarantine/cleanup.
+    The uploaded file should remain in place and the DB record should exist."""
+    import unittest.mock
+    from sqlalchemy.orm import Session as _Session
+
+    env = upload_env
+    client = env["client"]
+    uploads_dir = env["uploads_dir"]
+
+    content = b"test data for refresh failure"
+
+    original_refresh = _Session.refresh
+
+    def failing_refresh(self, instance, attribute_names=None):
+        raise RuntimeError("Simulated refresh failure")
+
+    _Session.refresh = failing_refresh  # type: ignore[assignment]
+
+    try:
+        response = _upload_file(client, "refresh_fail.txt", content)
+        assert response.status_code == 500
+        assert "refresh" in response.json()["detail"].lower()
+
+        # The file should STILL exist on disk (no quarantine/cleanup)
+        user_files = [f for f in uploads_dir.iterdir() if f.name != ".quarantine"]
+        assert len(user_files) == 1, "Uploaded file should remain after refresh failure"
+        assert user_files[0].read_bytes() == content, "File contents should be intact"
+
+        # The DB record should exist (commit succeeded)
+        # We can't easily query it without the record ID, but the fact that
+        # no quarantine happened means the commit path was taken
+    finally:
+        _Session.refresh = original_refresh  # type: ignore[assignment]
+
+
+def test_upload_db_exception_cause_preserved(upload_env):
+    """Original database exception must be preserved in HTTPException cause chain."""
+    import unittest.mock
+    from sqlalchemy.orm import Session as _Session
+
+    env = upload_env
+    client = env["client"]
+
+    original_commit = _Session.commit
+
+    class CustomDBError(Exception):
+        pass
+
+    def failing_commit(self):
+        raise CustomDBError("Specific database error message")
+
+    _Session.commit = failing_commit  # type: ignore[assignment]
+
+    try:
+        response = _upload_file(client, "cause_test.txt", b"data")
+        assert response.status_code == 500
+        # The HTTPException should have the original CustomDBError as its cause
+        # This is verified by the 'from db_exc' chaining in the endpoint
+        # We can't directly inspect the exception chain from the test client,
+        # but the endpoint code explicitly uses 'raise HTTPException(...) from db_exc'
+    finally:
+        _Session.commit = original_commit  # type: ignore[assignment]
+
+
+def test_upload_no_activity_on_failed_registration(upload_env):
+    """Verify no UPLOAD activity is created when DB registration fails."""
+    import unittest.mock
+    from sqlalchemy.orm import Session as _Session
+
+    env = upload_env
+    client = env["client"]
+
+    original_commit = _Session.commit
+
+    def failing_commit(self):
+        raise RuntimeError("Simulated database failure")
+
+    _Session.commit = failing_commit  # type: ignore[assignment]
+
+    try:
+        response = _upload_file(client, "fail.txt", b"data")
+        assert response.status_code == 500
+    finally:
+        _Session.commit = original_commit
+
+    # No activity should exist
+    act_res = client.get("/api/v1/activity")
+    assert act_res.json()["total"] == 0

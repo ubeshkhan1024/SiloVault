@@ -6,12 +6,11 @@ UnifiedFileRecord model.
 
 import logging
 import mimetypes
-import uuid
-from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -24,27 +23,15 @@ from backend.services.activity import (
     ACTION_DOWNLOAD,
     record_activity,
 )
+from backend.storage.registry import lookup
+from backend.storage.errors import (
+    StorageError,
+    StorageNotFoundError,
+    StoragePermissionError,
+    StorageUnavailableError,
+)
 
 router = APIRouter(prefix="/files", tags=["files"])
-
-
-def _resolve_uploads_dir() -> Path:
-    """Return the configured uploads directory as an absolute resolved path."""
-    return Path(settings.uploads_dir).resolve()
-
-
-def _safe_download_path(uploads_dir: Path, provider_file_id: str) -> Path | None:
-    """Resolve and validate a download path is strictly inside uploads_dir.
-
-    Returns the validated Path or None if the path would escape the uploads
-    directory (e.g. due to a crafted ``provider_file_id`` containing '..').
-    """
-    candidate = (uploads_dir / provider_file_id).resolve()
-    try:
-        candidate.relative_to(uploads_dir)
-    except ValueError:
-        return None
-    return candidate
 
 
 @router.get("", response_model=FileListResponse)
@@ -125,8 +112,8 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
       ``record.provider_file_id`` (a server-generated UUID); the original
       client-supplied ``name`` is used only as the download Content-Disposition
       header value.
-    - The resolved filesystem path is validated to remain strictly inside the
-      configured ``uploads_dir`` before the file is served.
+    - The LOCAL adapter validates the path remains strictly inside the
+      configured storage root before the file is served.
     - Missing records return 404; missing physical files return 404.
     """
     record = db.get(UnifiedFileRecord, file_id)
@@ -145,20 +132,25 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
             ),
         )
 
-    uploads_dir = _resolve_uploads_dir()
-    safe_path = _safe_download_path(uploads_dir, record.provider_file_id)
-
-    if safe_path is None:
+    # Get LOCAL adapter from registry and download
+    try:
+        adapter, _ = lookup("LOCAL")
+    except Exception as exc:
         raise HTTPException(
-            status_code=400,
-            detail="Stored file path is invalid or outside the upload directory.",
-        )
+            status_code=503,
+            detail=f"Storage provider unavailable: {exc}",
+        ) from exc
 
-    if not safe_path.exists() or not safe_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="The requested file is no longer available on disk.",
-        )
+    try:
+        file_bytes = adapter.download(record.provider_file_id)
+    except StorageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoragePermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Use the stored MIME type when present; otherwise let the OS detect it.
     mime_type = record.mime_type or "application/octet-stream"
@@ -182,10 +174,15 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
 
-    return FileResponse(
-        path=str(safe_path),
-        filename=safe_filename,
+    # Return bytes directly instead of using FileResponse to avoid filesystem path exposure
+    # RFC 5987 encoding: filename*=utf-8''<url-encoded-filename>
+    encoded_filename = quote(safe_filename, encoding='utf-8')
+    return Response(
+        content=file_bytes,
         media_type=mime_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=utf-8''{encoded_filename}",
+        },
     )
 
 
@@ -200,11 +197,10 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     - The resolved path must be strictly inside the configured
       ``uploads_dir``; traversal, absolute paths, and symlink escapes are
       rejected.
-    - A same-directory quarantine strategy ensures the original file is never
-      lost if the database commit fails: the file is first renamed to a unique
-      temporary name inside ``uploads_dir``, then the DB record is deleted and
-      committed. On success the quarantine file is removed; on failure the file
-      is restored to its original name and the DB transaction is rolled back.
+    - Quarantine/restore/cleanup protocol ensures the original file is never
+      lost if the database commit fails: the file is first quarantined, then
+      the DB record is deleted and committed. On success the quarantine file
+      is cleaned up; on failure the file is restored via the adapter.
     - Quarantine files have no DB record and are therefore invisible through
       normal API endpoints.
 
@@ -234,86 +230,59 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     # gone, so we keep this snapshot rather than a foreign key.
     deleted_file_name = record.name
     deleted_provider = record.provider
+    provider_file_id = record.provider_file_id
 
-    uploads_dir = _resolve_uploads_dir()
-    safe_path = _safe_download_path(uploads_dir, record.provider_file_id)
-
-    if safe_path is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Stored file path is invalid or outside the upload directory.",
-        )
-
-    # Reject symlink escapes.
-    if safe_path.is_symlink():
-        raise HTTPException(
-            status_code=400,
-            detail="Stored file path is a symlink and cannot be deleted.",
-        )
-
-    if not safe_path.exists() or not safe_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="The physical file is no longer available on disk.",
-        )
-
-    # --- Quarantine: rename file before touching the DB -------------------
-    quarantine_name = f".{record.provider_file_id}.quarantined.{uuid.uuid4().hex}"
-    quar_path = (uploads_dir / quarantine_name).resolve()
-
-    # Sanity-check the quarantine path stays inside uploads_dir.
+    # Get LOCAL adapter from registry
     try:
-        quar_path.relative_to(uploads_dir)
-    except ValueError:
-        db.rollback()
+        adapter, _ = lookup("LOCAL")
+    except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail="Internal error: could not generate a safe quarantine path.",
-        )
+            status_code=503,
+            detail=f"Storage provider unavailable: {exc}",
+        ) from exc
 
+    # Phase 1: Quarantine the physical file
     try:
-        safe_path.rename(quar_path)
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to stage file for deletion: {exc.strerror or 'unknown error'}",
-        )
+        quarantine_id = adapter.quarantine(provider_file_id)
+    except StorageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoragePermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # --- Delete database record ------------------------------------------
+    # Phase 2: Delete database record
     try:
         db.delete(record)
         db.commit()
-    except Exception:
+    except Exception as db_exc:
         db.rollback()
-        # Restore the original file; never overwrite an existing file.
-        if quar_path.exists():
-            try:
-                if not safe_path.exists():
-                    quar_path.rename(safe_path)
-                else:
-                    # Collision – leave quarantine named differently.
-                    logging.warning(
-                        "delete_file: collision restoring %s; leaving quarantine at %s",
-                        safe_path,
-                        quar_path,
-                    )
-            except OSError as exc:
-                logging.error(
-                    "delete_file: failed to restore original file after DB rollback: %s",
-                    exc,
-                )
+        # Phase 3b: Restore the quarantined file
+        try:
+            adapter.restore(quarantine_id)
+        except Exception as restore_exc:
+            logging.error(
+                "delete_file: failed to restore quarantined file %s after DB rollback: %s",
+                quarantine_id,
+                restore_exc,
+            )
         raise HTTPException(
             status_code=500,
             detail="Failed to delete the metadata record; the file has been restored.",
-        )
+        ) from db_exc
 
-    # Commit succeeded — remove the quarantined file.
+    # Phase 3a: Commit succeeded — permanently remove the quarantined file
     try:
-        quar_path.unlink(missing_ok=True)
-    except OSError:
+        adapter.cleanup(quarantine_id)
+    except Exception as cleanup_exc:
         # Best-effort cleanup; the file is already gone from the DB.
+        # Log the failure but do not report the deletion as failed.
         logging.warning(
-            "delete_file: failed to remove quarantine file %s", quar_path
+            "delete_file: failed to cleanup quarantine %s after successful DB commit: %s",
+            quarantine_id,
+            cleanup_exc,
         )
 
     # --- Activity recording: only after the deletion operation succeeds and
@@ -327,7 +296,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
             file_name=deleted_file_name,
             provider=deleted_provider,
             file_id=None,
-            details={"storage_filename": record.provider_file_id},
+            details={"storage_filename": provider_file_id},
         )
     except Exception:
         db.rollback()

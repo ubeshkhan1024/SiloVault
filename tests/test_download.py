@@ -14,6 +14,9 @@ from backend.config import settings
 from backend.database import Base, get_db
 from backend.main import app
 from backend.models.unified_file import UnifiedFileRecord
+from backend.storage.local import LocalAdapter
+from backend.storage.registry import register, remove
+from backend.storage.capabilities import CAPABILITY_MAP
 
 
 @pytest.fixture
@@ -45,6 +48,11 @@ def download_env(tmp_path, monkeypatch):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # Register LOCAL adapter with the temp uploads directory
+    adapter = LocalAdapter(str(uploads_dir))
+    register("LOCAL", adapter, CAPABILITY_MAP["LOCAL"])
+
     try:
         yield {
             "client": TestClient(app),
@@ -52,6 +60,8 @@ def download_env(tmp_path, monkeypatch):
             "uploads_dir": uploads_dir,
         }
     finally:
+        # Clean up adapter registration
+        remove("LOCAL")
         app.dependency_overrides.clear()
         engine.dispose()
 
@@ -206,7 +216,8 @@ def test_download_traversal_filename_cannot_escape_uploads_dir(download_env):
     record = _seed_local_record(engine, "../secret.txt", "traversal.txt")
 
     response = client.get(f"/api/v1/files/{record.id}/download")
-    assert response.status_code == 400
+    # Adapter validates path and returns 404 for non-existent/invalid paths
+    assert response.status_code == 404
 
     # The decoy file must remain untouched and was never served.
     assert decoy.read_text() == "top secret"
@@ -221,7 +232,8 @@ def test_download_absolute_path_filename_rejected(download_env):
     record = _seed_local_record(engine, "/etc/passwd", "abs.txt")
 
     response = client.get(f"/api/v1/files/{record.id}/download")
-    assert response.status_code == 400
+    # Adapter validates path and returns 404 for non-existent/invalid paths
+    assert response.status_code == 404
 
 
 def test_download_does_not_affect_existing_endpoints(download_env):

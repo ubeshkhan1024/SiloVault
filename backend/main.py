@@ -24,11 +24,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.api.v1.router import api_router
 from backend.config import settings
 from backend.database import check_database_migrated
+from backend.storage.local import LocalAdapter
+from backend.storage.registry import register, remove
+from backend.storage.capabilities import CAPABILITY_MAP
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan: gate the database on its migration state.
+    """Application lifespan: gate the database on its migration state and register storage adapters.
 
     This intentionally does **not** call ``Base.metadata.create_all()``.
     Schema changes are applied exclusively through Alembic migration scripts.
@@ -37,7 +40,16 @@ async def lifespan(app: FastAPI):
     run ``alembic upgrade head`` first.
     """
     check_database_migrated()
-    yield
+
+    # Register LOCAL storage adapter
+    adapter = LocalAdapter(settings.uploads_dir)
+    register("LOCAL", adapter, CAPABILITY_MAP["LOCAL"])
+
+    try:
+        yield
+    finally:
+        # Clean up adapter registration on shutdown
+        remove("LOCAL")
 
 
 app = FastAPI(

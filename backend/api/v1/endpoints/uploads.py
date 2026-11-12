@@ -5,9 +5,8 @@ registers metadata in the SQLite database.
 """
 
 import hashlib
+import logging
 import mimetypes
-import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -17,27 +16,16 @@ from backend.database import get_db
 from backend.models.unified_file import UnifiedFileRecord
 from backend.schemas import FileMetadata
 from backend.services.activity import ACTION_UPLOAD, record_activity
+from backend.storage.registry import lookup
+from backend.storage.errors import (
+    StorageConflictError,
+    StorageError,
+    StoragePermissionError,
+    StorageQuotaExceededError,
+    StorageUnavailableError,
+)
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
-
-
-def _get_uploads_dir() -> Path:
-    """Return the configured uploads directory, creating it if necessary."""
-    uploads_path = Path(settings.uploads_dir).resolve()
-    uploads_path.mkdir(parents=True, exist_ok=True)
-    return uploads_path
-
-
-def _generate_storage_filename(original_filename: str) -> str:
-    """Generate a unique, server-controlled storage filename.
-
-    Uses a UUID prefix to ensure uniqueness while preserving the original
-    extension for MIME type detection.
-    """
-    ext = Path(original_filename).suffix
-    if ext and len(ext) > 50:  # Sanity check on extension length
-        ext = ""
-    return f"{uuid.uuid4()}{ext}"
 
 
 def _detect_mime_type(filename: str, fallback: str = "application/octet-stream") -> str:
@@ -66,78 +54,96 @@ async def create_upload(
     - Cleans up partially written files if database registration fails.
     - Does not expose absolute local filesystem paths in the response.
     """
-    uploads_dir = _get_uploads_dir()
-    storage_filename = _generate_storage_filename(file.filename or "upload")
-    storage_path = uploads_dir / storage_filename
-
-    # Ensure we don't overwrite an existing file (extremely unlikely with UUID)
-    if storage_path.exists():
-        raise HTTPException(
-            status_code=500,
-            detail="Storage filename collision; please retry.",
-        )
-
-    sha256_hash = hashlib.sha256()
-    total_size = 0
+    # Read file content and calculate SHA-256 + size
+    content = await file.read()
+    total_size = len(content)
     max_size = settings.max_upload_size_bytes
-
-    try:
-        # Write file to disk while calculating hash and size
-        with storage_path.open("wb") as out_file:
-            while chunk := await file.read(1024 * 1024):  # 1 MiB chunks
-                total_size += len(chunk)
-                if total_size > max_size:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File size exceeds maximum allowed ({max_size} bytes).",
-                    )
-                sha256_hash.update(chunk)
-                out_file.write(chunk)
-    except HTTPException:
-        # Clean up on size limit or other HTTP errors during write
-        if storage_path.exists():
-            storage_path.unlink(missing_ok=True)
-        raise
-    except Exception:
-        # Clean up on any other error during write
-        if storage_path.exists():
-            storage_path.unlink(missing_ok=True)
+    if total_size > max_size:
         raise HTTPException(
-            status_code=500,
-            detail="Failed to write uploaded file.",
+            status_code=413,
+            detail=f"File size exceeds maximum allowed ({max_size} bytes).",
         )
 
-    # Finalize metadata
-    sha256_hex = sha256_hash.hexdigest()
-    mime_type = _detect_mime_type(file.filename or storage_filename)
+    sha256_hex = hashlib.sha256(content).hexdigest()
+    mime_type = _detect_mime_type(file.filename or "upload")
     original_name = file.filename or "unknown"
     logical_path = f"/{original_name}"
 
-    # Register in database
+    # Get LOCAL adapter from registry and upload
+    try:
+        adapter, _ = lookup("LOCAL")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage provider unavailable: {exc}",
+        ) from exc
+
+    try:
+        provider_record = adapter.upload(content, original_name, logical_path)
+    except StorageConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StorageQuotaExceededError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except StoragePermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Register in database using provider_record fields
     record = UnifiedFileRecord(
         provider="LOCAL",
         provider_account_id=None,
-        provider_file_id=storage_filename,
-        name=original_name,
-        logical_path=logical_path,
-        mime_type=mime_type,
-        size_bytes=total_size,
+        provider_file_id=provider_record.provider_file_id,
+        name=provider_record.name,
+        logical_path=provider_record.logical_path,
+        mime_type=provider_record.mime_type,
+        size_bytes=provider_record.size_bytes,
         sha256=sha256_hex,
         sync_state="LOCAL",
     )
 
+    # Phase 1: Database registration commit boundary
     try:
         db.add(record)
         db.commit()
-        db.refresh(record)
-    except Exception:
-        # Clean up stored file if database registration fails
-        if storage_path.exists():
-            storage_path.unlink(missing_ok=True)
+    except Exception as db_exc:
+        db.rollback()
+        # Use adapter quarantine/cleanup protocol to safely remove the uploaded file
+        quarantine_id = None
+        try:
+            adapter, _ = lookup("LOCAL")
+            quarantine_id = adapter.quarantine(provider_record.provider_file_id)
+            adapter.cleanup(quarantine_id)
+        except Exception as cleanup_exc:
+            # Log the cleanup failure but do not hide the original database failure
+            logging.error(
+                "create_upload: failed to quarantine/cleanup file %s after DB failure: %s",
+                provider_record.provider_file_id,
+                cleanup_exc,
+            )
         raise HTTPException(
             status_code=500,
-            detail="Failed to register file metadata; uploaded file cleaned up.",
+            detail="Failed to register file metadata; uploaded file cleanup attempted.",
+        ) from db_exc
+
+    # Phase 2: Post-commit refresh (separate boundary)
+    # A failure here must NOT trigger quarantine/cleanup since the commit succeeded.
+    try:
+        db.refresh(record)
+    except Exception as refresh_exc:
+        # The record is committed; do not quarantine the uploaded file.
+        # Log the refresh failure and raise a 500 without cleanup.
+        logging.error(
+            "create_upload: db.refresh failed after successful commit for file %s: %s",
+            provider_record.provider_file_id,
+            refresh_exc,
         )
+        raise HTTPException(
+            status_code=500,
+            detail="File registered but metadata refresh failed.",
+        ) from refresh_exc
 
     # --- Activity recording: only after the file and DB record are committed.
     # A failed operation never reaches this point, so no misleading success
@@ -153,7 +159,7 @@ async def create_upload(
                 "mime_type": mime_type,
                 "size_bytes": total_size,
                 "sha256": sha256_hex,
-                "storage_filename": storage_filename,
+                "storage_filename": provider_record.provider_file_id,
             },
         )
     except Exception:
