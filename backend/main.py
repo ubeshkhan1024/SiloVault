@@ -1,32 +1,25 @@
-"""SiloVault Backend Application Entry Point.
-
-Initializes the FastAPI application, attaches the versioned API router, and
-exposes the automatic OpenAPI documentation at `/docs`.
-
-Database ownership
--------------------
-The application does **not** run ``Base.metadata.create_all()`` at startup.
-Schema versioning is owned by Alembic — migrations are explicit, reviewed
-scripts committed to ``alembic/versions/``. On startup, :func:`init_db`
-(renamed to :func:`check_database_migrated`) verifies that the database has
-been migrated; if the ``alembic_version`` table is absent, the process fails
-fast with a clear instruction to run ``alembic upgrade head``.
-
-Never edit or delete the migration scripts without first reviewing their
-impact on existing user data.
-"""
-
 from contextlib import asynccontextmanager
+import logging
+import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.v1.router import api_router
+from backend.api.v1.endpoints.google_drive import _set_adapter as _set_gdrive_adapter
 from backend.config import settings
-from backend.database import check_database_migrated
+from backend.database import check_database_migrated, SessionLocal
+from backend.services.recovery import RecoveryService
+from backend.storage.capabilities import CAPABILITY_MAP
+from backend.storage.credentials import (
+    CredentialStorageError,
+    load_google_drive_credentials,
+)
+from backend.storage.google_drive import GoogleDriveAdapter
 from backend.storage.local import LocalAdapter
 from backend.storage.registry import register, remove
-from backend.storage.capabilities import CAPABILITY_MAP
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -38,18 +31,123 @@ async def lifespan(app: FastAPI):
     If the database has never been migrated (no ``alembic_version`` table),
     startup fails with an actionable error message telling the operator to
     run ``alembic upgrade head`` first.
+
+    Google Drive adapter registration is failure-safe: if credentials are
+    missing, invalid, or the keyring is unavailable, the LOCAL adapter
+    continues to operate normally.
+
+    Startup recovery runs a single batch immediately so crash survivors
+    are cleaned up before the first request; a background worker then
+    continues retrying any records that were waiting their scheduled
+    back-off time.
     """
     check_database_migrated()
 
-    # Register LOCAL storage adapter
+    # Register LOCAL storage adapter (always available)
     adapter = LocalAdapter(settings.uploads_dir)
     register("LOCAL", adapter, CAPABILITY_MAP["LOCAL"])
+
+    # Attempt to restore Google Drive connection from stored credentials
+    # This is best-effort — failures are logged but do not block startup.
+    try:
+        stored = load_google_drive_credentials()
+    except CredentialStorageError as exc:
+        logger.warning(
+            "Google Drive credential store unavailable; skipping auto-connect: %s", exc
+        )
+        stored = None
+
+    if stored:
+        try:
+            gdrive_adapter = GoogleDriveAdapter()
+            gdrive_adapter.authenticate(
+                {
+                    "refresh_token": stored.refresh_token,
+                    "client_id": stored.client_id,
+                    "client_secret": stored.client_secret,
+                    "scopes": stored.scopes,
+                }
+            )
+            register("GOOGLE_DRIVE", gdrive_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+            _set_gdrive_adapter(gdrive_adapter)
+            logger.info("Google Drive adapter registered from stored credentials")
+        except Exception as exc:
+            logger.warning(
+                "Failed to restore Google Drive connection from stored credentials: %s", exc
+            )
+            # Do not register the adapter; user can reconnect via /connect
+
+    # Build the recovery service before yielding so it can be accessed
+    # by both the one-shot startup pass and the background worker.
+    recovery = RecoveryService(lambda: SessionLocal())
+
+    # One-shot startup pass: process any records eligible right now.
+    try:
+        count = recovery.process_pending_deletions(batch_size=5)
+        logger.info("Startup recovery processed %s pending deletion(s)", count)
+    except Exception as exc:
+        logger.warning("Startup recovery failed: %s", exc)
+
+    # Launch the background polling worker as a fire-and-forget task.
+    # It will keep retrying records whose next_retry_at is in the future
+    # without blocking the ASGI event loop.
+    app.state.recovery_service = recovery
+    worker_task = asyncio.create_task(_recovery_poll_loop(recovery))
+    app.state._recovery_worker_task = worker_task
 
     try:
         yield
     finally:
-        # Clean up adapter registration on shutdown
+        # Stop the background worker gracefully on shutdown.
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+        # Clean up adapter registrations
         remove("LOCAL")
+        try:
+            remove("GOOGLE_DRIVE")
+        except Exception:
+            pass  # Was never registered
+
+
+async def _recovery_poll_loop(recovery: RecoveryService) -> None:
+    """Continuously poll for and process eligible pending-deletion records.
+
+    Runs indefinitely until cancelled. Each iteration waits at least
+    ``POLL_INTERVAL_SECONDS`` between attempts so the DB is not hammered
+    when nothing needs attention, and respects each record's
+    ``next_retry_at`` timestamp so transient failures are retried with
+    exponential backoff rather than spamming the provider.
+    """
+    from datetime import timedelta as _td
+
+    POLL_INTERVAL_SECONDS = 30
+
+    while True:
+        try:
+            count = recovery.process_pending_deletions(batch_size=5)
+            if count > 0:
+                logger.debug("Background recovery processed %s pending deletion(s)", count)
+        except Exception as exc:
+            logger.warning("Background recovery loop error: %s", exc)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, _sleep_seconds, POLL_INTERVAL_SECONDS),
+                timeout=POLL_INTERVAL_SECONDS + 1,
+            )
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            break
+
+
+def _sleep_seconds(seconds: int) -> None:
+    """Block for *seconds* seconds in a thread pool (for use with run_in_executor)."""
+    import time
+    time.sleep(seconds)
 
 
 app = FastAPI(

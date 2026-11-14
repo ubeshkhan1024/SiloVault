@@ -1,0 +1,537 @@
+"""File indexing and metadata endpoints.
+
+Real implementation backed by the SQLite metadata database using
+UnifiedFileRecord model.
+"""
+
+import logging
+import mimetypes
+import threading
+import queue
+from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
+from typing import Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import Response
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session, sessionmaker
+
+from backend.config import settings
+from backend.database import get_db
+from backend.models.pending_deletion import PendingDeletion
+from backend.models.unified_file import UnifiedFileRecord
+from backend.schemas import FileListResponse, FileMetadata, RenameRequest
+from backend.services.activity import (
+    ACTION_DELETE,
+    ACTION_DOWNLOAD,
+    ACTION_RENAME,
+    record_activity,
+)
+from backend.services.recovery import LEASE_DURATION_SECONDS, MAX_RETRIES
+from backend.storage.registry import lookup
+from backend.storage.errors import (
+    StorageAuthenticationError,
+    StorageError,
+    StorageNotFoundError,
+    StoragePermissionError,
+    StorageUnavailableError,
+)
+from backend.database import Base
+import uuid
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/files", tags=["files"])
+
+
+@router.get("", response_model=FileListResponse)
+async def list_files(
+    provider: Optional[str] = Query(None, description="Filter by storage provider"),
+    category: Optional[str] = Query(None, description="Filter by file category"),
+    sync_state: Optional[str] = Query(None, description="Filter by sync state"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum number of items to return"),
+    offset: int = Query(0, ge=0, description="Number of items to skip"),
+    db: Session = Depends(get_db),
+) -> FileListResponse:
+    """List indexed files with pagination and optional filters.
+
+    Returns a paginated list of file metadata records. Supports filtering by
+    provider, category, and sync_state. Results are ordered by created_at DESC
+    with a stable secondary sort by id.
+    """
+    # Build the base query
+    stmt = select(UnifiedFileRecord)
+    count_stmt = select(func.count(UnifiedFileRecord.id))
+
+    # Apply filters
+    if provider:
+        stmt = stmt.where(UnifiedFileRecord.provider == provider)
+        count_stmt = count_stmt.where(UnifiedFileRecord.provider == provider)
+    if category:
+        stmt = stmt.where(UnifiedFileRecord.category == category)
+        count_stmt = count_stmt.where(UnifiedFileRecord.category == category)
+    if sync_state:
+        stmt = stmt.where(UnifiedFileRecord.sync_state == sync_state)
+        count_stmt = count_stmt.where(UnifiedFileRecord.sync_state == sync_state)
+
+    # Apply ordering: created_at DESC, then id DESC for stable ordering
+    stmt = stmt.order_by(
+        UnifiedFileRecord.created_at.desc(),
+        UnifiedFileRecord.id.desc(),
+    )
+
+    # Apply pagination
+    stmt = stmt.limit(limit).offset(offset)
+
+    # Execute queries
+    items = db.execute(stmt).scalars().all()
+    total = db.execute(count_stmt).scalar_one()
+
+    # Convert to response schema
+    return FileListResponse(
+        items=[FileMetadata.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/{file_id}", response_model=FileMetadata)
+async def get_file(file_id: str, db: Session = Depends(get_db)) -> FileMetadata:
+    """Retrieve a single file's unified metadata by internal ID.
+
+    Returns the full ``FileMetadata`` record for the given internal ID
+    (``file_<UUID>``). Raises HTTP 404 if the record does not exist.
+    """
+    record = db.get(UnifiedFileRecord, file_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"File with id '{file_id}' was not found.",
+        )
+    return FileMetadata.model_validate(record)
+
+
+@router.get("/{file_id}/download")
+async def download_file(file_id: str, db: Session = Depends(get_db)):
+    """Download a file by its internal record ID.
+
+    Security guarantees:
+    - The adapter for ``record.provider`` is used exclusively; the client-
+      supplied ``file_id`` resolves only a database row.
+    - For LOCAL records the on-disk path is derived from
+      ``record.provider_file_id`` (a server-generated UUID); the original
+      client-supplied ``name`` is used only as the Content-Disposition header.
+    - For cloud-provider records the provider-assigned identifier is passed
+      through to that provider's adapter verbatim -- the endpoint never
+      interprets or constructs paths from it.
+    - Missing records return 404; missing files in any provider return 404.
+    """
+    record = db.get(UnifiedFileRecord, file_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"File with id '{file_id}' was not found.",
+        )
+
+    # Resolve the adapter for the record's provider and download from it.
+    try:
+        adapter, _ = lookup(record.provider)
+    except StorageUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage provider unavailable: {exc}",
+        ) from exc
+
+    try:
+        file_bytes = adapter.download(record.provider_file_id)
+    except StorageAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except StorageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoragePermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Use the stored MIME type when present; otherwise let the OS detect it.
+    mime_type = record.mime_type or "application/octet-stream"
+
+    # Sanitise the original name for the Content-Disposition header by stripping
+    # any newline/carriage-return characters that could inject headers.
+    safe_filename = "".join(ch for ch in record.name if ch not in "\r\n") or "download"
+
+    # --- Activity recording: recorded when the download response is
+    # successfully initiated. We do NOT claim the user completed the download;
+    # this records that the server successfully served the file.
+    try:
+        record_activity(
+            db,
+            ACTION_DOWNLOAD,
+            file_name=record.name,
+            provider=record.provider,
+            file_id=record.id,
+            details={"mime_type": mime_type, "size_bytes": record.size_bytes},
+        )
+    except Exception:
+        db.rollback()
+
+    # Return bytes directly instead of using FileResponse to avoid filesystem path exposure
+    # RFC 5987 encoding: filename*=utf-8''<url-encoded-filename>
+    encoded_filename = quote(safe_filename, encoding="utf-8")
+    return Response(
+        content=file_bytes,
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=utf-8''{encoded_filename}"
+        },
+    )
+
+
+@router.delete("/{file_id}", status_code=204)
+async def delete_file(file_id: str, db: Session = Depends(get_db)):
+    """Delete a locally stored file and its metadata record.
+
+    Security guarantees:
+    - Only records with ``provider='LOCAL'`` can be deleted.
+    - The physical path is derived exclusively from
+      ``record.provider_file_id`` (a server-generated UUID filename).
+    - The resolved path must be strictly inside the configured
+      ``uploads_dir``; traversal, absolute paths, and symlink escapes are
+      rejected.
+    - Quarantine/restore/cleanup protocol ensures the original file is never
+      lost if the database commit fails: the file is first quarantined, then
+      the DB record is deleted and committed. On success the quarantine file
+      is cleaned up; on failure the file is restored via the adapter.
+    - Quarantine files have no DB record and are therefore invisible through
+      normal API endpoints.
+    - Pending deletion records survive application crashes and are processed
+      by the recovery service on startup or by background workers.
+
+    Returns:
+    - 204 No Content on success.
+    - 404 if the record does not exist or the physical file is missing.
+    - 400 for non-LOCAL providers or invalid paths.
+    """
+    record = db.get(UnifiedFileRecord, file_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"File with id '{file_id}' was not found.",
+        )
+
+    if record.provider != "LOCAL":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Deletion is only supported for LOCAL provider records. "
+                f"Provider '{record.provider}' is not eligible."
+            ),
+        )
+
+    # Snapshot the original filename BEFORE the DB record is removed. The
+    # delete activity must remain identifiable even after the file record is
+    # gone, so we keep this snapshot rather than a foreign key.
+    deleted_file_name = record.name
+    deleted_provider = record.provider
+    provider_file_id = record.provider_file_id
+
+    # Get LOCAL adapter from registry
+    try:
+        adapter, _ = lookup("LOCAL")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage provider unavailable: {exc}",
+        ) from exc
+
+    # Phase 1: Quarantine the physical file
+    try:
+        quarantine_id = adapter.quarantine(provider_file_id)
+    except StorageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoragePermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Phase 2: Create pending deletion record and delete database record
+    # in the same transaction. The PendingDeletion record survives crashes
+    # between the DB commit and the provider cleanup call; the recovery
+    # service will process it on application restart.
+    # The API acquires claim-token ownership so the recovery worker
+    # cannot safely claim this record until the lease expires.
+    claim_token = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    pending = PendingDeletion(
+        provider=deleted_provider,
+        provider_account_id=None,
+        provider_file_id=provider_file_id,
+        quarantine_id=quarantine_id,
+        file_name_snapshot=deleted_file_name,
+        status="PROCESSING",  # acquired ownership; recovery worker won't re-claim until lease expires
+        retry_count=0,
+        last_error=None,
+        claim_token=claim_token,
+        processing_started_at=now,
+        lease_expires_at=now + timedelta(seconds=LEASE_DURATION_SECONDS),  # 5 minutes
+        created_at=datetime.now(timezone.utc),
+        last_attempted_at=None,
+        next_retry_at=None,
+    )
+    db.add(pending)
+    db.add(record)  # will be deleted below
+    try:
+        db.delete(record)
+        db.commit()
+    except Exception as db_exc:
+        db.rollback()
+        # Phase 3b: DB commit failed -- restore the quarantined file
+        # and remove the pending deletion (rolled back with db.rollback)
+        try:
+            adapter.restore(quarantine_id)
+        except Exception as restore_exc:
+            logging.error(
+                "delete_file: failed to restore quarantined file %s after DB rollback: %s",
+                quarantine_id,
+                restore_exc,
+            )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete the metadata record; the file has been restored.",
+        ) from db_exc
+
+    # Phase 3a: Commit succeeded -- call adapter.cleanup to permanently
+    # remove the quarantined file. The PendingDeletion record remains so
+    # the recovery service can coordinate cleanup across restarts.
+    # The API still owns the claim token; finalize only if ownership is intact.
+    # A heartbeat thread renews the lease while cleanup is executing, so the
+    # recovery worker cannot reclaim the record mid-operation. The heartbeat
+    # thread uses its OWN session bound to the same engine as the request
+    # session -- the request session is never shared across threads.
+    cleanup_ok = False
+    cleanup_error = None
+    heartbeat_stopped = False
+    try:
+        stop_event = threading.Event()
+        heartbeat_error_queue = queue.Queue()
+
+        def heartbeat_thread() -> None:
+            """Renew the lease while adapter.cleanup() is running.
+
+            Opens its own session (bound to the same engine as the request
+            session) so the request session is never used from another
+            thread. On each tick it conditionally renews the lease; if the
+            conditional UPDATE affects zero rows the ownership was lost and
+            the main thread is signalled via heartbeat_error_queue.
+            """
+            hb_session = sessionmaker(
+                bind=db.bind, autocommit=False, autoflush=False, future=True
+            )()
+            try:
+                while not stop_event.is_set():
+                    try:
+                        now = datetime.now(timezone.utc)
+                        # Renew lease only while we still own the record
+                        # (matching claim token AND unexpired lease).
+                        stmt = (
+                            update(PendingDeletion)
+                            .where(
+                                PendingDeletion.id == pending.id,
+                                PendingDeletion.status == "PROCESSING",
+                                PendingDeletion.claim_token == claim_token,
+                                PendingDeletion.lease_expires_at > now,
+                            )
+                            .values(
+                                lease_expires_at=now
+                                + timedelta(seconds=LEASE_DURATION_SECONDS)
+                            )
+                        )
+                        result = hb_session.execute(stmt)
+                        if result.rowcount == 0:
+                            # Ownership lost -- stop renewing, signal main thread.
+                            heartbeat_error_queue.put_nowait("lost_ownership")
+                            stop_event.set()
+                            break
+                        hb_session.commit()
+                    except Exception as e:
+                        heartbeat_error_queue.put_nowait(f"heartbeat_error: {e}")
+                        stop_event.set()
+                        break
+                    # Yield point: check stop_event every second.
+                    stop_event.wait(timeout=1)
+            finally:
+                hb_session.close()
+
+        # Start heartbeat thread and run cleanup concurrently.
+        ht = threading.Thread(target=heartbeat_thread, daemon=True)
+        ht.start()
+        try:
+            adapter.cleanup(quarantine_id)
+            cleanup_ok = True
+        except Exception as cleanup_exc:
+            cleanup_error = cleanup_exc
+            # Cleanup failed; the record must stay in the queue for the
+            # recovery worker to retry.
+            logging.warning(
+                "delete_file: failed to cleanup quarantine %s: %s",
+                quarantine_id,
+                cleanup_exc,
+            )
+        finally:
+            # Signal the heartbeat thread to stop and wait for it to finish.
+            stop_event.set()
+            ht.join(timeout=10)
+            heartbeat_stopped = not ht.is_alive()
+            if not heartbeat_stopped:
+                # The heartbeat thread may still be renewing the lease;
+                # do NOT finalize or schedule a retry while it is alive.
+                # Leave the record intact for recovery after lease expiry.
+                logger.warning(
+                    "delete_file: heartbeat thread did not stop within timeout; "
+                    "skipping finalization and retry scheduling; id=%s",
+                    pending.id,
+                )
+        # The heartbeat thread has stopped, so its result (if any) is now final.
+        heartbeat_error = None
+        try:
+            heartbeat_error = heartbeat_error_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        if not heartbeat_stopped:
+            # Do not touch the pending record while its heartbeat thread may still
+            # be running. The recovery worker can reclaim it after its lease expires.
+            pass
+        elif heartbeat_error is not None:
+            # Ownership was lost or the heartbeat failed. Leave the record intact
+            # for the recovery worker; never finalize or retry without ownership.
+            logger.warning(
+                "delete_file: heartbeat reported an ownership error for pending deletion %s: %s",
+                pending.id,
+                heartbeat_error,
+            )
+        elif cleanup_ok:
+            # Mirror RecoveryService._finalize_success: delete only while this
+            # request still owns an unexpired PROCESSING lease.
+            from sqlalchemy import delete
+
+            finalize_now = datetime.now(timezone.utc)
+            finalize_stmt = delete(PendingDeletion).where(
+                PendingDeletion.id == pending.id,
+                PendingDeletion.status == "PROCESSING",
+                PendingDeletion.claim_token == claim_token,
+                PendingDeletion.lease_expires_at > finalize_now,
+            )
+            try:
+                finalize_result = db.execute(finalize_stmt)
+                if finalize_result.rowcount == 1:
+                    db.commit()
+                else:
+                    db.rollback()
+                    logger.warning(
+                        "delete_file: could not finalize pending deletion %s because ownership was lost",
+                        pending.id,
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "delete_file: failed to finalize pending deletion %s; recovery will retry after lease expiry",
+                    pending.id,
+                )
+        elif cleanup_error is not None:
+            # Mirror RecoveryService._schedule_retry, including its five
+            # ownership checks and exponential backoff policy.
+            try:
+                db.expire_all()
+                current_pending = db.get(PendingDeletion, pending.id)
+
+                if current_pending is None or current_pending.claim_token != claim_token:
+                    logger.warning(
+                        "delete_file: lost claim ownership for pending deletion %s; "
+                        "cleanup failure left for recovery",
+                        pending.id,
+                    )
+                else:
+                    expected_retry_count = current_pending.retry_count
+                    retry_now = datetime.now(timezone.utc)
+                    next_retry_count = expected_retry_count + 1
+                    can_retry = next_retry_count < MAX_RETRIES
+
+                    retry_stmt = (
+                        update(PendingDeletion)
+                        .where(
+                            PendingDeletion.id == pending.id,
+                            PendingDeletion.status == "PROCESSING",
+                            PendingDeletion.claim_token == claim_token,
+                            PendingDeletion.lease_expires_at > retry_now,
+                            PendingDeletion.retry_count == expected_retry_count,
+                        )
+                        .values(
+                            retry_count=next_retry_count,
+                            last_error=str(cleanup_error),
+                            last_attempted_at=retry_now,
+                            claim_token=None,
+                            processing_started_at=None,
+                            lease_expires_at=None,
+                            status="PENDING" if can_retry else "FAILED",
+                            next_retry_at=(
+                                retry_now + timedelta(seconds=30 * (2 ** expected_retry_count))
+                                if can_retry
+                                else None
+                            ),
+                        )
+                    )
+                    retry_result = db.execute(retry_stmt)
+                    if retry_result.rowcount == 1:
+                        db.commit()
+                    else:
+                        db.rollback()
+                        logger.warning(
+                            "delete_file: could not schedule retry for pending deletion %s "
+                            "because ownership or retry state changed",
+                            pending.id,
+                        )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "delete_file: failed to schedule cleanup retry for pending deletion %s; "
+                    "recovery will retry after lease expiry",
+                    pending.id,
+                )
+        else:
+            logger.warning(
+                "delete_file: cleanup did not complete for pending deletion %s, "
+                "but no cleanup exception was recorded",
+                pending.id,
+            )
+    except Exception:
+        # The metadata deletion and durable PendingDeletion row are already
+        # committed. Leave the row for the recovery worker if finalization
+        # could not complete here.
+        db.rollback()
+        logger.exception(
+            "delete_file: unexpected error during cleanup finalization for pending deletion %s",
+            pending.id,
+        )
+
+    # Record the delete activity after the metadata record has been removed.
+    # file_id is intentionally NULL so the activity remains identifiable.
+    try:
+        record_activity(
+            db,
+            ACTION_DELETE,
+            file_name=deleted_file_name,
+            provider=deleted_provider,
+            file_id=None,
+            details={"storage_filename": provider_file_id},
+        )
+    except Exception:
+        db.rollback()
+
+    return None  # 204 No Content

@@ -16,13 +16,13 @@ To ensure clarity across all documentation, architecture elements are categorize
 
 | Status | Definition | Components |
 |---|---|---|
-| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton with 14 registered routes, PWA frontend shell (6 views, service worker), SQLite database with Alembic migrations, `UnifiedFileRecord` model, real file CRUD endpoints (`POST /uploads`, `GET /files`, `GET /files/{id}`, `GET /files/{id}/download`, `DELETE /files/{id}`), frontend Files and Uploads views wired to backend, 81 automated tests across 9 test modules. Cloud adapter stubs, AI pipeline, mobile uploader, approval queue, and cloud provider integrations remain placeholder. |
-| **Planned** | Approved core requirement, design in progress | Unified Storage Service orchestration layer, Provider Adapter Interface (`StorageAdapter` base class), Google Drive Adapter, OneDrive/Dropbox/Box Adapters, Mobile Inbox intake, AI Pipeline (Ollama), Human Review Queue, Reversible storage rules |
+| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton, PWA frontend shell, SQLite database with Alembic migrations, `UnifiedFileRecord` model, full file CRUD endpoints (upload, list, detail, download, delete, rename, move), activity history, Google Drive OAuth flow, storage adapter registry (LOCAL + GOOGLE_DRIVE), background deletion recovery service, 541 automated tests. AI pipeline, mobile uploader, approval queue, and other cloud provider integrations remain planned for future milestones. |
+| **Planned** | Approved core requirement, design in progress | Unified Storage Service orchestration layer, OneDrive/Dropbox/Box Adapters, Mobile Inbox intake, AI Pipeline (Ollama), Human Review Queue, Reversible storage rules |
 | **Proposed** | Architectural choice under evaluation | Multi-provider adapters (MEGA with E2EE), Supabase for Cloud Control Plane, Cross-device metadata sync |
 | **Future Possibility** | Concept for potential future extension | Additional storage providers (AWS S3, Nextcloud), multi-device sync, local vector DB / semantic search |
 
 > [!NOTE]
-> Milestone 1 (Local Storage Foundation) is complete. The SQLite database, `UnifiedFileRecord` model, Alembic-migration-managed schema, and full file CRUD endpoint suite are implemented and tested. The remaining components — provider adapters, AI pipeline, mobile uploader, human approval queue, and cloud control plane — are documented as planned or proposed in the roadmap and have not yet been implemented.
+> Milestones 1 through 3.2 are complete. The SQLite database, `UnifiedFileRecord` model, Alembic-migration-managed schema, full file CRUD endpoint suite (including rename and logical move), Google Drive OAuth integration, storage adapter registry, and background deletion recovery service are implemented and covered by 541 automated tests. Real Google Drive account integration has not yet been manually verified against a live account; all Google Drive behavior is verified with mocked adapters. The remaining components — AI pipeline, mobile uploader, human approval queue, and additional cloud providers — are documented as planned or proposed in the roadmap and have not yet been implemented.
 
 ---
 
@@ -311,3 +311,63 @@ alembic/
 | `alembic downgrade -1` | Revert one migration (local testing only) |
 
 See [README.md](../README.md#database-migrations-alembic) for the full developer workflow, including the temporary-database pattern for safe autogenerate and testing.
+
+## 7. M3.2 Implementation (Google Drive Integration & File Management)
+
+**Status: Implemented (M0, M1, M2, M3.1, M3.2 complete; M4 NOT STARTED)**
+
+Milestones M0 through M3.2 are implemented and covered by 541 automated tests. This section documents the completed M3.2 functionality and its verified behavior.
+
+### 7.1 Google Drive OAuth and Credential Management
+
+- **Endpoints:** `POST /api/v1/google-drive/connect`, `GET /api/v1/google-drive/status`, `DELETE /api/v1/google-drive/disconnect`.
+- **Flow:** Installed-app loopback OAuth with PKCE. A local callback server on a random port receives the authorization code; the code is exchanged for a refresh token.
+- **Credential storage:** Only the refresh token (plus granted scopes and the discovered SiloVault root folder ID) is persisted, in the **OS keyring** (Windows Credential Manager / macOS Keychain / Linux Secret Service) via the `keyring` library. Access tokens are kept in memory only and are never written to disk or logs.
+- **Scope configuration:** Configured via `GOOGLE_DRIVE_CLIENT_ID` / `GOOGLE_DRIVE_CLIENT_SECRET` environment variables (see `.env.example`); scopes come from `settings.google_drive_scopes_list`.
+- **Security:** OAuth callback query strings (which contain the authorization code) are suppressed from request logging. Secrets are never included in API responses. On authentication failure during connect, stored credentials are cleaned up.
+- **Startup restoration:** On application startup the backend attempts to restore the Google Drive connection from stored credentials (best-effort; failures do not block startup, and the LOCAL adapter always operates).
+
+### 7.2 Storage Adapter and Provider Registry
+
+- **Interface:** `StorageOperations` (abstract) defines the mandatory operations: `upload`, `download`, `rename`, `move`, `quarantine`, `restore`, `cleanup`. `StorageLifecycle` (optional) adds `authenticate`, `refresh`, `disconnect` for cloud providers; `LocalAdapter` deliberately does not implement it.
+- **Registry:** Adapters are registered under canonical provider IDs (`LOCAL`, `GOOGLE_DRIVE`) during application lifespan setup via `register(provider_id, adapter, capabilities)`; endpoints dispatch through `lookup(provider_id)`. Unknown providers raise `StorageUnavailableError` (mapped to HTTP 503).
+- **Google Drive adapter:** `GoogleDriveAdapter` implements all seven `StorageOperations` methods plus the lifecycle hooks. It manages a dedicated "SiloVault" root folder (discovered or created, with the folder ID persisted to the keyring). All Drive API `HttpError`s are mapped to the SiloVault storage error hierarchy (404 → not found, 403 → permission, 429/403 rate-limit → rate limit, 413 → quota, 5xx → unavailable).
+
+### 7.3 Upload and Download Integration
+
+- **Upload:** `POST /api/v1/uploads` accepts a `provider` query parameter (default `LOCAL`) and dispatches through the registry. For GOOGLE_DRIVE, files are uploaded to the SiloVault root folder via resumable upload.
+- **Download:** `GET /api/v1/files/{file_id}/download` dispatches through `lookup(record.provider)`; the client-supplied `file_id` resolves only a database row, and the provider-assigned identifier is passed verbatim to the adapter.
+- **Listing/Detail:** `GET /api/v1/files` and `GET /api/v1/files/{file_id}` serve from the unified metadata database regardless of provider.
+
+### 7.4 Deletion and Recovery Workflow
+
+- **Endpoint:** `DELETE /api/v1/files/{file_id}` is currently supported for LOCAL records only (non-LOCAL providers are rejected with 400).
+- **Protocol:** Three-phase transaction — (1) quarantine the physical file, (2) delete the metadata record and write a durable `PendingDeletion` row in the same transaction, (3a) on commit success, run physical cleanup; (3b) on commit failure, restore the quarantined file so nothing is lost.
+- **Recovery service:** A background worker (plus a one-shot startup pass) processes `PendingDeletion` records. It uses **claim tokens and leases** (5-minute lease, renewed by a heartbeat while cleanup runs) to coordinate ownership between the API and the worker, with exponential-backoff retries (up to 5) before a record is marked `FAILED`.
+- **Known limitations (do not overstate the safety guarantees):**
+  - The lease/claim mechanism provides a strong ownership convention at the database level, but it is **not** a perfectly concurrency-safe guarantee in the distributed-systems sense: if a process is hard-killed (e.g., power loss) while a physical cleanup is in flight, a second worker can claim the record after the lease expires and re-run cleanup. Cleanup is written to be idempotent (an already-absent resource is treated as success), which is the practical mitigation.
+  - The heartbeat thread uses a 10-second join timeout; if it has not stopped, finalization and retry scheduling are skipped and the record is left for recovery after lease expiry.
+  - Google Drive deletion (trash/quarantine via the Drive API) is not yet exposed through the `DELETE` endpoint; the recovery service itself already supports GOOGLE_DRIVE records.
+
+### 7.5 File Rename API
+
+- **Endpoint:** `PATCH /api/v1/files/{file_id}/rename` with body `{"new_name": "..."}` (1–255 characters, whitespace-only rejected).
+- **Dispatch:** Provider-neutral via `lookup(record.provider)`; supports LOCAL and GOOGLE_DRIVE.
+- **Behavior:**
+  - **LOCAL:** The physical storage filename (server-generated UUID) is **not** changed. Only the user-facing `name` in the database is updated.
+  - **GOOGLE_DRIVE:** The **actual Google Drive filename is changed** via the Drive API (`files().update` with the new name).
+- **Safety:** The adapter is called before any database change; the returned provider record's `provider_file_id` must match the database record before the update is committed. Only `name` and `updated_at` are modified; all other metadata is preserved. A successful rename is recorded in the activity log (`RENAME`).
+
+### 7.6 Logical Move API
+
+- **Endpoint:** `PATCH /api/v1/files/{file_id}/move` with body `{"target_logical_path": "..."}` (1–1024 characters, whitespace-only rejected).
+- **Dispatch:** Provider-neutral via `lookup(record.provider)`; supports LOCAL and GOOGLE_DRIVE.
+- **Behavior:**
+  - **LOCAL:** The physical file stays in place; only the `logical_path` in the database is updated. Local storage keeps its existing flat physical file organization.
+  - **GOOGLE_DRIVE:** This is a **logical organization operation only** — SiloVault's `logical_path` is updated, but the **Google Drive parent folder is not changed**. The file remains in its original Drive location.
+- **Safety:** Same pattern as rename — adapter call before database change, provider-record validation, only `logical_path` and `updated_at` modified, activity logged (`MOVE`).
+
+### 7.7 Verification Status
+
+- All behavior above is verified by the automated test suite (541 passed, 3 skipped). Google Drive behavior is verified with **mocked** Drive API services and a fake keyring — no live account calls are made in tests.
+- **Not yet manually verified:** real Google Drive account integration (live OAuth connect, live upload/download/rename/move against an actual Drive account). This manual QA remains open for M3.2 sign-off.

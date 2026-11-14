@@ -20,16 +20,3 @@ async def process_file(file_id: str):
         "message": "AI processing is not yet implemented.",
         "file_id": file_id,
     }
-
-
-@router.get("/tasks/{task_id}")
-async def get_processing_task(task_id: str):
-    """Query the status of an asynchronous local AI processing task.
-
-    TODO: Implement task status lookup.
-    """
-    return {
-        "status": "placeholder",
-        "message": "Processing task lookup is not yet implemented.",
-        "task_id": task_id,
-    }

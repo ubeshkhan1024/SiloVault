@@ -2,7 +2,8 @@
 
 > A privacy-focused, AI-powered unified cloud storage management platform.
 
-**Status:** Milestone 1 (Local Storage Foundation) complete. SQLite database with Alembic migrations, unified file metadata model, real CRUD endpoints (`POST /uploads`, `GET /files`, `GET /files/{id}`, `GET /files/{id}/download`, `DELETE /files/{id}`), **Activity History** (`GET /api/v1/activity`) recording every successful upload, download, and delete, and frontend Files/Uploads/Dashboard/Activity views wired to the backend. Cloud provider adapters, AI pipeline, mobile uploader, approval queue, and cross-provider sync remain planned for future milestones.
+**Status:** Milestone 3.2 (Google Drive Integration & File Management) complete. SQLite database with Alembic migrations, unified file metadata model, real CRUD endpoints (including `PATCH /files/{id}/rename` and `PATCH /files/{id}/move`), OAuth-based Google Drive connectivity, storage adapter registry, and background deletion recovery service are all implemented and verified.
+
 
 ## What SiloVault is
 

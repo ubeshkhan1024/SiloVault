@@ -33,10 +33,21 @@ class Settings(BaseSettings):
     uploads_dir: str = "uploads"
     max_upload_size_bytes: int = 100 * 1024 * 1024  # 100 MiB
 
-    # Placeholder for future cloud / AI configuration.
-    # These are read from the environment but never committed as defaults.
+    # Google Drive OAuth configuration (M3.1).
+    # Client credentials from Google Cloud Console (Desktop app type).
     google_drive_client_id: str | None = None
     google_drive_client_secret: str | None = None
+
+    # OAuth redirect URI for the installed-app loopback flow.
+    # Uses "http://localhost:0" to let the OS assign a random free port.
+    # The actual port is determined at runtime when the local server starts.
+    google_drive_redirect_uri: str = "http://localhost:0"
+
+    # OAuth scopes (space-separated). Default is drive.file for per-file access.
+    google_drive_scopes: str = "https://www.googleapis.com/auth/drive.file"
+
+    # Placeholder for future cloud / AI configuration.
+    # These are read from the environment but never committed as defaults.
     supabase_url: str | None = None
     supabase_key: str | None = None
 
@@ -50,6 +61,11 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         """Return the SQLAlchemy-compatible database URL."""
         return f"sqlite:///{self.database_path}"
+
+    @property
+    def google_drive_scopes_list(self) -> list[str]:
+        """Return scopes as a list for the OAuth flow."""
+        return [s.strip() for s in self.google_drive_scopes.split() if s.strip()]
 
 
 settings = Settings()

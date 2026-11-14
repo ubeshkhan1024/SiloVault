@@ -17,6 +17,8 @@ When adding a new model module under ``backend/models/``:
 """
 
 from backend.models.activity import ActivityRecord
+from backend.models.ai_task import AiTask
+from backend.models.pending_deletion import PendingDeletion
 from backend.models.unified_file import UnifiedFileRecord
 
-__all__: list[str] = ["ActivityRecord", "UnifiedFileRecord"]
+__all__: list[str] = ["ActivityRecord", "AiTask", "PendingDeletion", "UnifiedFileRecord"]

@@ -20,6 +20,8 @@ from backend.models.activity import ActivityRecord
 ACTION_UPLOAD = "UPLOAD"
 ACTION_DOWNLOAD = "DOWNLOAD"
 ACTION_DELETE = "DELETE"
+ACTION_RENAME = "RENAME"
+ACTION_MOVE = "MOVE"
 
 # Canonical status.
 STATUS_SUCCESS = "SUCCESS"

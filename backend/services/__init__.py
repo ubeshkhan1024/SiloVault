@@ -12,6 +12,7 @@ from backend.services.activity import (
     STATUS_SUCCESS,
     record_activity,
 )
+from backend.services.recovery import RecoveryService
 
 __all__: list[str] = [
     "ACTION_DELETE",
@@ -19,4 +20,5 @@ __all__: list[str] = [
     "ACTION_UPLOAD",
     "STATUS_SUCCESS",
     "record_activity",
+    "RecoveryService",
 ]

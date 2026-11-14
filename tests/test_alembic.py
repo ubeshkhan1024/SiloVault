@@ -161,9 +161,10 @@ def test_fresh_db_upgrades_to_head(temp_db):
             tables = _table_names(conn)
             assert "unified_file_records" in tables
             assert "activity_records" in tables
+            assert "pending_deletions" in tables
             assert "alembic_version" in tables
             rev = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-            assert rev == "4ef0d0cc89e5"
+            assert rev == "20261114165042"
     finally:
         engine.dispose()
 
@@ -345,6 +346,7 @@ def test_downgrade_restores_original_data_on_re_upgrade(temp_db):
             tables = _table_names(conn)
             assert "unified_file_records" in tables
             assert "activity_records" in tables
+            assert "pending_deletions" in tables
             assert "alembic_version" in tables
             columns = _column_names(conn, "unified_file_records")
             assert EXPECTED_COLUMNS == columns

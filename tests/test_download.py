@@ -171,8 +171,16 @@ def test_download_missing_physical_file_returns_404(download_env):
     assert list(uploads_dir.iterdir()) == []
 
 
-def test_download_non_local_provider_rejected(download_env):
-    """Cloud-provider records must not be downloadable from local storage."""
+def test_download_non_local_provider_unregistered_returns_503(download_env):
+    """Download of a GOOGLE_DRIVE record fails with 503 when the provider is
+    not registered, since the endpoint dispatches to the provider adapter
+    via ``lookup(record.provider)`` rather than hard‑coding ``LOCAL``.
+
+    The test inserts a ``GOOGLE_DRIVE`` record into the in-memory database
+    but does **not** register a ``GOOGLE_DRIVE`` adapter.  The endpoint
+    calls ``lookup(record.provider)`` which raises
+    ``StorageUnavailableError`` — mapped to HTTP 503.
+    """
     env = download_env
     client = env["client"]
     engine = env["engine"]
@@ -196,9 +204,9 @@ def test_download_non_local_provider_rejected(download_env):
         session.close()
 
     response = client.get(f"/api/v1/files/{record.id}/download")
-    assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert "LOCAL" in detail
+    # Provider not registered → lookup() raises StorageUnavailableError → 503
+    assert response.status_code == 503
+    assert "detail" in response.json()
 
 
 def test_download_traversal_filename_cannot_escape_uploads_dir(download_env):

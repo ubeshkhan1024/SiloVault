@@ -45,6 +45,74 @@ class FileListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Rename / Move request schemas
+# ---------------------------------------------------------------------------
+
+class RenameRequest(BaseModel):
+    """Request body for the rename endpoint."""
+
+    new_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="New user-facing filename for the file.",
+    )
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class MoveRequest(BaseModel):
+    """Request body for the logical move endpoint."""
+
+    target_logical_path: str = Field(
+        ...,
+        min_length=1,
+        max_length=1024,
+        description="New logical path (directory prefix + filename) for the file.",
+    )
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+# ---------------------------------------------------------------------------
+# AI Task schemas
+# ---------------------------------------------------------------------------
+
+class AiTaskCreateRequest(BaseModel):
+    """Request body for creating an AI task."""
+
+    file_id: str = Field(..., description="ID of the file to process")
+    task_type: str = Field(..., description="Type of AI task (e.g. 'text_classification')")
+
+
+class AiTaskResponse(BaseModel):
+    """AI task details response."""
+
+    id: str
+    file_id: Optional[str]
+    task_type: str
+    status: str
+    retries: int
+    max_retries: int
+    created_at: datetime
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    proposal_json: Optional[Dict[str, Any]]
+    error_message: Optional[str]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AiTaskListResponse(BaseModel):
+    """Paginated AI task list response."""
+
+    items: List[AiTaskResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+# ---------------------------------------------------------------------------
 # Activity schemas
 # ---------------------------------------------------------------------------
 
@@ -75,6 +143,11 @@ class ActivityListResponse(BaseModel):
 __all__: list[str] = [
     "FileMetadata",
     "FileListResponse",
+    "RenameRequest",
+    "MoveRequest",
+    "AiTaskCreateRequest",
+    "AiTaskResponse",
+    "AiTaskListResponse",
     "ActivityRecordSchema",
     "ActivityListResponse",
 ]

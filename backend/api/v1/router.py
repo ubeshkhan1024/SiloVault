@@ -7,7 +7,9 @@ from fastapi import APIRouter
 
 from backend.api.v1.endpoints import (
     activity,
+    ai_tasks,
     files,
+    google_drive,
     health,
     processing,
     review,
@@ -24,3 +26,5 @@ api_router.include_router(sync.router)
 api_router.include_router(processing.router)
 api_router.include_router(review.router)
 api_router.include_router(activity.router)
+api_router.include_router(ai_tasks.router)
+api_router.include_router(google_drive.router)

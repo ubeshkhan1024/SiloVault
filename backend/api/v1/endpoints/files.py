@@ -6,30 +6,42 @@ UnifiedFileRecord model.
 
 import logging
 import mimetypes
-from typing import Optional
+import threading
+import queue
+from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session, sessionmaker
 
 from backend.config import settings
 from backend.database import get_db
+from backend.models.pending_deletion import PendingDeletion
 from backend.models.unified_file import UnifiedFileRecord
-from backend.schemas import FileListResponse, FileMetadata
+from backend.schemas import FileListResponse, FileMetadata, MoveRequest, RenameRequest
 from backend.services.activity import (
     ACTION_DELETE,
     ACTION_DOWNLOAD,
+    ACTION_MOVE,
+    ACTION_RENAME,
     record_activity,
 )
+from backend.services.recovery import LEASE_DURATION_SECONDS, MAX_RETRIES
 from backend.storage.registry import lookup
 from backend.storage.errors import (
+    StorageAuthenticationError,
     StorageError,
     StorageNotFoundError,
     StoragePermissionError,
     StorageUnavailableError,
 )
+from backend.database import Base
+import uuid
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -104,17 +116,18 @@ async def get_file(file_id: str, db: Session = Depends(get_db)) -> FileMetadata:
 
 @router.get("/{file_id}/download")
 async def download_file(file_id: str, db: Session = Depends(get_db)):
-    """Download a locally stored file by its internal record ID.
+    """Download a file by its internal record ID.
 
     Security guarantees:
-    - Only records with ``provider='LOCAL'`` can be downloaded.
-    - The on-disk filename is taken exclusively from
+    - The adapter for ``record.provider`` is used exclusively; the client-
+      supplied ``file_id`` resolves only a database row.
+    - For LOCAL records the on-disk path is derived from
       ``record.provider_file_id`` (a server-generated UUID); the original
-      client-supplied ``name`` is used only as the download Content-Disposition
-      header value.
-    - The LOCAL adapter validates the path remains strictly inside the
-      configured storage root before the file is served.
-    - Missing records return 404; missing physical files return 404.
+      client-supplied ``name`` is used only as the Content-Disposition header.
+    - For cloud-provider records the provider-assigned identifier is passed
+      through to that provider's adapter verbatim -- the endpoint never
+      interprets or constructs paths from it.
+    - Missing records return 404; missing files in any provider return 404.
     """
     record = db.get(UnifiedFileRecord, file_id)
     if record is None:
@@ -123,19 +136,10 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
             detail=f"File with id '{file_id}' was not found.",
         )
 
-    if record.provider != "LOCAL":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Downloads are only supported for LOCAL provider records. "
-                f"Provider '{record.provider}' is not eligible."
-            ),
-        )
-
-    # Get LOCAL adapter from registry and download
+    # Resolve the adapter for the record's provider and download from it.
     try:
-        adapter, _ = lookup("LOCAL")
-    except Exception as exc:
+        adapter, _ = lookup(record.provider)
+    except StorageUnavailableError as exc:
         raise HTTPException(
             status_code=503,
             detail=f"Storage provider unavailable: {exc}",
@@ -143,6 +147,8 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
 
     try:
         file_bytes = adapter.download(record.provider_file_id)
+    except StorageAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except StorageNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except StoragePermissionError as exc:
@@ -176,12 +182,12 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
 
     # Return bytes directly instead of using FileResponse to avoid filesystem path exposure
     # RFC 5987 encoding: filename*=utf-8''<url-encoded-filename>
-    encoded_filename = quote(safe_filename, encoding='utf-8')
+    encoded_filename = quote(safe_filename, encoding="utf-8")
     return Response(
         content=file_bytes,
         media_type=mime_type,
         headers={
-            "Content-Disposition": f"attachment; filename*=utf-8''{encoded_filename}",
+            "Content-Disposition": f"attachment; filename*=utf-8''{encoded_filename}"
         },
     )
 
@@ -203,6 +209,8 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
       is cleaned up; on failure the file is restored via the adapter.
     - Quarantine files have no DB record and are therefore invisible through
       normal API endpoints.
+    - Pending deletion records survive application crashes and are processed
+      by the recovery service on startup or by background workers.
 
     Returns:
     - 204 No Content on success.
@@ -253,13 +261,39 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     except StorageError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # Phase 2: Delete database record
+    # Phase 2: Create pending deletion record and delete database record
+    # in the same transaction. The PendingDeletion record survives crashes
+    # between the DB commit and the provider cleanup call; the recovery
+    # service will process it on application restart.
+    # The API acquires claim-token ownership so the recovery worker
+    # cannot safely claim this record until the lease expires.
+    claim_token = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    pending = PendingDeletion(
+        provider=deleted_provider,
+        provider_account_id=None,
+        provider_file_id=provider_file_id,
+        quarantine_id=quarantine_id,
+        file_name_snapshot=deleted_file_name,
+        status="PROCESSING",  # acquired ownership; recovery worker won't re-claim until lease expires
+        retry_count=0,
+        last_error=None,
+        claim_token=claim_token,
+        processing_started_at=now,
+        lease_expires_at=now + timedelta(seconds=LEASE_DURATION_SECONDS),  # 5 minutes
+        created_at=datetime.now(timezone.utc),
+        last_attempted_at=None,
+        next_retry_at=None,
+    )
+    db.add(pending)
+    db.add(record)  # will be deleted below
     try:
         db.delete(record)
         db.commit()
     except Exception as db_exc:
         db.rollback()
-        # Phase 3b: Restore the quarantined file
+        # Phase 3b: DB commit failed -- restore the quarantined file
+        # and remove the pending deletion (rolled back with db.rollback)
         try:
             adapter.restore(quarantine_id)
         except Exception as restore_exc:
@@ -273,22 +307,222 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
             detail="Failed to delete the metadata record; the file has been restored.",
         ) from db_exc
 
-    # Phase 3a: Commit succeeded — permanently remove the quarantined file
+    # Phase 3a: Commit succeeded -- call adapter.cleanup to permanently
+    # remove the quarantined file. The PendingDeletion record remains so
+    # the recovery service can coordinate cleanup across restarts.
+    # The API still owns the claim token; finalize only if ownership is intact.
+    # A heartbeat thread renews the lease while cleanup is executing, so the
+    # recovery worker cannot reclaim the record mid-operation. The heartbeat
+    # thread uses its OWN session bound to the same engine as the request
+    # session -- the request session is never shared across threads.
+    cleanup_ok = False
+    cleanup_error = None
+    heartbeat_stopped = False
     try:
-        adapter.cleanup(quarantine_id)
-    except Exception as cleanup_exc:
-        # Best-effort cleanup; the file is already gone from the DB.
-        # Log the failure but do not report the deletion as failed.
-        logging.warning(
-            "delete_file: failed to cleanup quarantine %s after successful DB commit: %s",
-            quarantine_id,
-            cleanup_exc,
+        stop_event = threading.Event()
+        heartbeat_error_queue = queue.Queue()
+
+        def heartbeat_thread() -> None:
+            """Renew the lease while adapter.cleanup() is running.
+
+            Opens its own session (bound to the same engine as the request
+            session) so the request session is never used from another
+            thread. On each tick it conditionally renews the lease; if the
+            conditional UPDATE affects zero rows the ownership was lost and
+            the main thread is signalled via heartbeat_error_queue.
+            """
+            hb_session = sessionmaker(
+                bind=db.bind, autocommit=False, autoflush=False, future=True
+            )()
+            try:
+                while not stop_event.is_set():
+                    try:
+                        now = datetime.now(timezone.utc)
+                        # Renew lease only while we still own the record
+                        # (matching claim token AND unexpired lease).
+                        stmt = (
+                            update(PendingDeletion)
+                            .where(
+                                PendingDeletion.id == pending.id,
+                                PendingDeletion.status == "PROCESSING",
+                                PendingDeletion.claim_token == claim_token,
+                                PendingDeletion.lease_expires_at > now,
+                            )
+                            .values(
+                                lease_expires_at=now
+                                + timedelta(seconds=LEASE_DURATION_SECONDS)
+                            )
+                        )
+                        result = hb_session.execute(stmt)
+                        if result.rowcount == 0:
+                            # Ownership lost -- stop renewing, signal main thread.
+                            heartbeat_error_queue.put_nowait("lost_ownership")
+                            stop_event.set()
+                            break
+                        hb_session.commit()
+                    except Exception as e:
+                        heartbeat_error_queue.put_nowait(f"heartbeat_error: {e}")
+                        stop_event.set()
+                        break
+                    # Yield point: check stop_event every second.
+                    stop_event.wait(timeout=1)
+            finally:
+                hb_session.close()
+
+        # Start heartbeat thread and run cleanup concurrently.
+        ht = threading.Thread(target=heartbeat_thread, daemon=True)
+        ht.start()
+        try:
+            adapter.cleanup(quarantine_id)
+            cleanup_ok = True
+        except Exception as cleanup_exc:
+            cleanup_error = cleanup_exc
+            # Cleanup failed; the record must stay in the queue for the
+            # recovery worker to retry.
+            logging.warning(
+                "delete_file: failed to cleanup quarantine %s: %s",
+                quarantine_id,
+                cleanup_exc,
+            )
+        finally:
+            # Signal the heartbeat thread to stop and wait for it to finish.
+            stop_event.set()
+            ht.join(timeout=10)
+            heartbeat_stopped = not ht.is_alive()
+            if not heartbeat_stopped:
+                # The heartbeat thread may still be renewing the lease;
+                # do NOT finalize or schedule a retry while it is alive.
+                # Leave the record intact for recovery after lease expiry.
+                logger.warning(
+                    "delete_file: heartbeat thread did not stop within timeout; "
+                    "skipping finalization and retry scheduling; id=%s",
+                    pending.id,
+                )
+        # The heartbeat thread has stopped, so its result (if any) is now final.
+        heartbeat_error = None
+        try:
+            heartbeat_error = heartbeat_error_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        if not heartbeat_stopped:
+            # Do not touch the pending record while its heartbeat thread may still
+            # be running. The recovery worker can reclaim it after its lease expires.
+            pass
+        elif heartbeat_error is not None:
+            # Ownership was lost or the heartbeat failed. Leave the record intact
+            # for the recovery worker; never finalize or retry without ownership.
+            logger.warning(
+                "delete_file: heartbeat reported an ownership error for pending deletion %s: %s",
+                pending.id,
+                heartbeat_error,
+            )
+        elif cleanup_ok:
+            # Mirror RecoveryService._finalize_success: delete only while this
+            # request still owns an unexpired PROCESSING lease.
+            from sqlalchemy import delete
+
+            finalize_now = datetime.now(timezone.utc)
+            finalize_stmt = delete(PendingDeletion).where(
+                PendingDeletion.id == pending.id,
+                PendingDeletion.status == "PROCESSING",
+                PendingDeletion.claim_token == claim_token,
+                PendingDeletion.lease_expires_at > finalize_now,
+            )
+            try:
+                finalize_result = db.execute(finalize_stmt)
+                if finalize_result.rowcount == 1:
+                    db.commit()
+                else:
+                    db.rollback()
+                    logger.warning(
+                        "delete_file: could not finalize pending deletion %s because ownership was lost",
+                        pending.id,
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "delete_file: failed to finalize pending deletion %s; recovery will retry after lease expiry",
+                    pending.id,
+                )
+        elif cleanup_error is not None:
+            # Mirror RecoveryService._schedule_retry, including its five
+            # ownership checks and exponential backoff policy.
+            try:
+                db.expire_all()
+                current_pending = db.get(PendingDeletion, pending.id)
+
+                if current_pending is None or current_pending.claim_token != claim_token:
+                    logger.warning(
+                        "delete_file: lost claim ownership for pending deletion %s; "
+                        "cleanup failure left for recovery",
+                        pending.id,
+                    )
+                else:
+                    expected_retry_count = current_pending.retry_count
+                    retry_now = datetime.now(timezone.utc)
+                    next_retry_count = expected_retry_count + 1
+                    can_retry = next_retry_count < MAX_RETRIES
+
+                    retry_stmt = (
+                        update(PendingDeletion)
+                        .where(
+                            PendingDeletion.id == pending.id,
+                            PendingDeletion.status == "PROCESSING",
+                            PendingDeletion.claim_token == claim_token,
+                            PendingDeletion.lease_expires_at > retry_now,
+                            PendingDeletion.retry_count == expected_retry_count,
+                        )
+                        .values(
+                            retry_count=next_retry_count,
+                            last_error=str(cleanup_error),
+                            last_attempted_at=retry_now,
+                            claim_token=None,
+                            processing_started_at=None,
+                            lease_expires_at=None,
+                            status="PENDING" if can_retry else "FAILED",
+                            next_retry_at=(
+                                retry_now + timedelta(seconds=30 * (2 ** expected_retry_count))
+                                if can_retry
+                                else None
+                            ),
+                        )
+                    )
+                    retry_result = db.execute(retry_stmt)
+                    if retry_result.rowcount == 1:
+                        db.commit()
+                    else:
+                        db.rollback()
+                        logger.warning(
+                            "delete_file: could not schedule retry for pending deletion %s "
+                            "because ownership or retry state changed",
+                            pending.id,
+                        )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "delete_file: failed to schedule cleanup retry for pending deletion %s; "
+                    "recovery will retry after lease expiry",
+                    pending.id,
+                )
+        else:
+            logger.warning(
+                "delete_file: cleanup did not complete for pending deletion %s, "
+                "but no cleanup exception was recorded",
+                pending.id,
+            )
+    except Exception:
+        # The metadata deletion and durable PendingDeletion row are already
+        # committed. Leave the row for the recovery worker if finalization
+        # could not complete here.
+        db.rollback()
+        logger.exception(
+            "delete_file: unexpected error during cleanup finalization for pending deletion %s",
+            pending.id,
         )
 
-    # --- Activity recording: only after the deletion operation succeeds and
-    # the file record has been removed. ``file_id`` is intentionally NULL so
-    # the activity outlives the file record; ``file_name`` is the snapshot
-    # taken before deletion.
+    # Record the delete activity after the metadata record has been removed.
+    # file_id is intentionally NULL so the activity remains identifiable.
     try:
         record_activity(
             db,
@@ -302,3 +536,260 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
         db.rollback()
 
     return None  # 204 No Content
+
+
+@router.patch(
+    "/{file_id}/rename",
+    response_model=FileMetadata,
+    summary="Rename a file",
+    description=(
+        "Rename a file's user-facing name through the appropriate storage "
+        "provider adapter. Dispatches to LOCAL, GOOGLE_DRIVE, or any other "
+        "registered provider via lookup(record.provider). The physical file "
+        "is never modified for LOCAL records -- only the database metadata "
+        "is updated. For GOOGLE_DRIVE the Drive API files().update() call "
+        "changes the file's display name."
+    ),
+)
+async def rename_file(
+    file_id: str,
+    body: RenameRequest,
+    db: Session = Depends(get_db),
+) -> FileMetadata:
+    """Rename a file via its provider adapter and persist the new name.
+
+    Security guarantees:
+    - The adapter for ``record.provider`` is used exclusively; the client-
+      supplied ``file_id`` resolves only a database row.
+    - The adapter's rename() is called BEFORE any database changes, so a
+      provider failure never leaves a half-updated database record.
+    - The returned ProviderFileRecord is validated: its provider_file_id
+      must match the database record's provider_file_id before committing.
+    - Only the ``name`` and ``updated_at`` fields are modified; all other
+      metadata (logical_path, mime_type, size_bytes, sha256, category,
+      tags, sync_state, provider_metadata) is preserved.
+
+    Returns:
+    - 200 with the updated FileMetadata.
+    - 404 if the record does not exist or the provider file is missing.
+    - 400 if the request body is invalid (empty/whitespace-only name).
+    - 401 if the provider reports an authentication failure.
+    - 403 if the provider reports a permission failure.
+    - 503 if the provider is unavailable or not registered.
+    - 500 for other storage errors.
+    """
+    # 1. Locate the database record.
+    record = db.get(UnifiedFileRecord, file_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"File with id '{file_id}' was not found.",
+        )
+
+    # 2. Resolve the adapter for the record's provider.
+    try:
+        adapter, _ = lookup(record.provider)
+    except StorageUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage provider unavailable: {exc}",
+        ) from exc
+
+    # 3. Call the adapter's rename() BEFORE touching the database.
+    #    A provider failure must never leave a half-updated record.
+    try:
+        provider_record = adapter.rename(record.provider_file_id, body.new_name)
+    except StorageAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except StorageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoragePermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # 4. Validate the returned provider record corresponds to the
+    #    expected file. A mismatch means the adapter returned data for
+    #    a different resource -- refuse to update the database.
+    if provider_record.provider_file_id != record.provider_file_id:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Provider returned mismatched file identifier "
+                f"(expected {record.provider_file_id!r}, "
+                f"got {provider_record.provider_file_id!r})"
+            ),
+        )
+
+    # 5. Snapshot the original name for the activity record before
+    #    updating the database row.
+    old_name = record.name
+    new_name = provider_record.name
+
+    # 6. Update only the intended metadata fields. Preserve all
+    #    unrelated metadata (logical_path, mime_type, size_bytes,
+    #    sha256, category, tags, sync_state, provider_metadata).
+    record.name = new_name
+    # updated_at has an onupdate hook; set it explicitly so the change
+    # is deterministic and visible in the response.
+    record.updated_at = datetime.now(timezone.utc)
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist the renamed file metadata.",
+        )
+
+    db.refresh(record)
+
+    # 7. Record the rename activity after the database commit succeeds.
+    try:
+        record_activity(
+            db,
+            ACTION_RENAME,
+            file_name=old_name,
+            provider=record.provider,
+            file_id=record.id,
+            details={
+                "new_name": new_name,
+                "provider_file_id": record.provider_file_id,
+            },
+        )
+    except Exception:
+        db.rollback()
+
+    return FileMetadata.model_validate(record)
+
+
+@router.patch(
+    "/{file_id}/move",
+    response_model=FileMetadata,
+    summary="Move a file logically",
+    description=(
+        "Move a file to a different logical path through the appropriate "
+        "storage provider adapter. Dispatches to LOCAL, GOOGLE_DRIVE, or any "
+        "other registered provider via lookup(record.provider). For both "
+        "LOCAL and GOOGLE_DRIVE records, this is a logical organization "
+        "operation only: the physical file or Drive parent folder is NOT "
+        "modified -- only the database logical_path metadata is updated."
+    ),
+)
+async def move_file(
+    file_id: str,
+    body: MoveRequest,
+    db: Session = Depends(get_db),
+) -> FileMetadata:
+    """Move a file logically via its provider adapter and persist the new path.
+
+    Security guarantees:
+    - The adapter for ``record.provider`` is used exclusively; the client-
+      supplied ``file_id`` resolves only a database row.
+    - The adapter's move() is called BEFORE any database changes, so a
+      provider failure never leaves a half-updated database record.
+    - The returned ProviderFileRecord is validated: its provider_file_id
+      must match the database record's provider_file_id before committing.
+    - Only the ``logical_path`` and ``updated_at`` fields are modified; all
+      other metadata (name, mime_type, size_bytes, sha256, category,
+      tags, sync_state, provider_metadata) is preserved.
+
+    Returns:
+    - 200 with the updated FileMetadata.
+    - 404 if the record does not exist or the provider file is missing.
+    - 400 if the request body is invalid (empty/whitespace-only path).
+    - 401 if the provider reports an authentication failure.
+    - 403 if the provider reports a permission failure.
+    - 503 if the provider is unavailable or not registered.
+    - 500 for other storage errors.
+    """
+    # 1. Locate the database record.
+    record = db.get(UnifiedFileRecord, file_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"File with id '{file_id}' was not found.",
+        )
+
+    # 2. Resolve the adapter for the record's provider.
+    try:
+        adapter, _ = lookup(record.provider)
+    except StorageUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Storage provider unavailable: {exc}",
+        ) from exc
+
+    # 3. Call the adapter's move() BEFORE touching the database.
+    #    A provider failure must never leave a half-updated record.
+    try:
+        provider_record = adapter.move(record.provider_file_id, body.target_logical_path)
+    except StorageAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except StorageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoragePermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # 4. Validate the returned provider record corresponds to the
+    #    expected file. A mismatch means the adapter returned data for
+    #    a different resource -- refuse to update the database.
+    if provider_record.provider_file_id != record.provider_file_id:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Provider returned mismatched file identifier "
+                f"(expected {record.provider_file_id!r}, "
+                f"got {provider_record.provider_file_id!r})"
+            ),
+        )
+
+    # 5. Snapshot the original path for the activity record before
+    #    updating the database row.
+    old_path = record.logical_path
+    new_path = provider_record.logical_path
+
+    # 6. Update only the intended metadata fields. Preserve all
+    #    unrelated metadata (name, mime_type, size_bytes,
+    #    sha256, category, tags, sync_state, provider_metadata).
+    record.logical_path = new_path
+    # updated_at has an onupdate hook; set it explicitly so the change
+    # is deterministic and visible in the response.
+    record.updated_at = datetime.now(timezone.utc)
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist the moved file metadata.",
+        )
+
+    db.refresh(record)
+
+    # 7. Record the move activity after the database commit succeeds.
+    try:
+        record_activity(
+            db,
+            ACTION_MOVE,
+            file_name=record.name,
+            provider=record.provider,
+            file_id=record.id,
+            details={
+                "old_logical_path": old_path,
+                "new_logical_path": new_path,
+                "provider_file_id": record.provider_file_id,
+            },
+        )
+    except Exception:
+        db.rollback()
+
+    return FileMetadata.model_validate(record)

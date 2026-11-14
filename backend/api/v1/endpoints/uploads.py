@@ -8,7 +8,7 @@ import hashlib
 import logging
 import mimetypes
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -37,15 +37,22 @@ def _detect_mime_type(filename: str, fallback: str = "application/octet-stream")
 @router.post("", response_model=FileMetadata)
 async def create_upload(
     file: UploadFile = File(...),
+    provider: str = Query("LOCAL", pattern="^[A-Z][A-Z0-9_]*$"),
     db: Session = Depends(get_db),
 ) -> FileMetadata:
-    """Upload a file to local storage and register its metadata.
+    """Upload a file to the specified storage provider and register its metadata.
 
     - Stores the file under the configured uploads directory with a unique
       server-generated filename.
     - Calculates SHA-256 from the uploaded bytes while writing.
     - Records file size, MIME type, and original filename in the database.
     - Returns the registered file metadata.
+
+    Parameters
+    ----------
+    provider : str
+        Storage provider identifier (e.g. "LOCAL", "GOOGLE_DRIVE").
+        Defaults to "LOCAL". Must match canonical provider ID pattern.
 
     Security:
     - Never uses the client-provided filename as a filesystem path.
@@ -69,9 +76,9 @@ async def create_upload(
     original_name = file.filename or "unknown"
     logical_path = f"/{original_name}"
 
-    # Get LOCAL adapter from registry and upload
+    # Get adapter from registry and upload
     try:
-        adapter, _ = lookup("LOCAL")
+        adapter, _ = lookup(provider)
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -93,7 +100,7 @@ async def create_upload(
 
     # Register in database using provider_record fields
     record = UnifiedFileRecord(
-        provider="LOCAL",
+        provider=provider,
         provider_account_id=None,
         provider_file_id=provider_record.provider_file_id,
         name=provider_record.name,
@@ -101,7 +108,7 @@ async def create_upload(
         mime_type=provider_record.mime_type,
         size_bytes=provider_record.size_bytes,
         sha256=sha256_hex,
-        sync_state="LOCAL",
+        sync_state="LOCAL" if provider == "LOCAL" else "PENDING",
     )
 
     # Phase 1: Database registration commit boundary
@@ -111,18 +118,20 @@ async def create_upload(
     except Exception as db_exc:
         db.rollback()
         # Use adapter quarantine/cleanup protocol to safely remove the uploaded file
-        quarantine_id = None
-        try:
-            adapter, _ = lookup("LOCAL")
-            quarantine_id = adapter.quarantine(provider_record.provider_file_id)
-            adapter.cleanup(quarantine_id)
-        except Exception as cleanup_exc:
-            # Log the cleanup failure but do not hide the original database failure
-            logging.error(
-                "create_upload: failed to quarantine/cleanup file %s after DB failure: %s",
-                provider_record.provider_file_id,
-                cleanup_exc,
-            )
+        # Only LOCAL adapter implements quarantine/cleanup at this stage
+        if provider == "LOCAL":
+            quarantine_id = None
+            try:
+                adapter, _ = lookup("LOCAL")
+                quarantine_id = adapter.quarantine(provider_record.provider_file_id)
+                adapter.cleanup(quarantine_id)
+            except Exception as cleanup_exc:
+                # Log the cleanup failure but do not hide the original database failure
+                logging.error(
+                    "create_upload: failed to quarantine/cleanup file %s after DB failure: %s",
+                    provider_record.provider_file_id,
+                    cleanup_exc,
+                )
         raise HTTPException(
             status_code=500,
             detail="Failed to register file metadata; uploaded file cleanup attempted.",
@@ -153,7 +162,7 @@ async def create_upload(
             db,
             ACTION_UPLOAD,
             file_name=original_name,
-            provider="LOCAL",
+            provider=provider,
             file_id=record.id,
             details={
                 "mime_type": mime_type,
