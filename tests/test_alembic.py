@@ -164,7 +164,7 @@ def test_fresh_db_upgrades_to_head(temp_db):
             assert "pending_deletions" in tables
             assert "alembic_version" in tables
             rev = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-            assert rev == "20261114165042"
+            assert rev == "20261117221800"
     finally:
         engine.dispose()
 

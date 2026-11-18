@@ -1,0 +1,270 @@
+﻿alembic
+    versions
+        20261114165042_create_ai_tasks_table.py
+        20261115130000_add_restore_snapshot_columns.py
+        20261116185600_add_operation_type_to_pending_deletions.py
+        20261117221800_enforce_not_null_operation_type.py
+        4ef0d0cc89e5_create_activity_records_table.py
+        597b2cc67a4a_create_pending_deletions_table.py
+        b436c12118f9_create_unified_file_records_baseline.py
+    env.py
+    README
+    script.py.mako
+backend
+    ai
+        __init__.py
+    api
+        v1
+            endpoints
+                __init__.py
+                activity.py
+                ai_tasks.py
+                files.py
+                files.py.b1.6c-stage1-backup
+                files.py.b1.6c-stage2-backup
+                files.py.backup
+                files.py.truncated-backup
+                google_drive.py
+                health.py
+                processing.py
+                review.py
+                sync.py
+                uploads.py
+            __init__.py
+            router.py
+        __init__.py
+    schemas
+        __init__.py
+    services
+        __init__.py
+        activity.py
+        recovery.py
+        recovery.py.bak
+    storage
+        __init__.py
+        capabilities.py
+        credentials.py
+        errors.py
+        google_drive.py
+        interfaces.py
+        local.py
+        registry.py
+        types.py
+    __init__.py
+    config.py
+    database.py
+    dependencies.py
+    main.py
+data
+docs
+    API_CONTRACT.md
+    ARCHITECTURE.md
+    COLLABORATION.md
+    DATA_FLOW.md
+    PROJECT_BLUEPRINT.md
+    PROJECT_OVERVIEW.md
+    ROADMAP.md
+    SECURITY.md
+frontend
+    assets
+    css
+        style.css
+    js
+        activity.js
+        api.js
+        app.js
+        dashboard.js
+        files.js
+        settings.js
+        uploads.js
+    index.html
+    manifest.json
+    service-worker.js
+qa_test
+    silovault-drive-test.txt
+scratch
+    basetest
+        uploads
+        silo_vault.db
+    add_gen_fence_tests.py
+    add_operation_type_tests.py
+    add_repair2_tests.py
+    add_uuid_import.py
+    append_fix1b1_tests.py
+    apply_fix1b1.py
+    apply_fix1b2.py
+    apply_repair2.py
+    apply_repair3.py
+    apply_repair3_tests.py
+    fix_mock_sigs.py
+    fix_multiline_calls.py
+    fix_operation_type_tests.py
+    fix_repair2_test.py
+    fix_seed_pending.py
+    fix_seed_pending_func.py
+    fix_test_recovery.py
+    fix_test_signatures.py
+    inspect_db.py
+    inspect_schema_detail.py
+    inspect_schema_detail2.py
+    inspect_schema_detail3.py
+    test_migration.py
+    test_quoting.bat
+    update_test_recovery.ps1
+    update_test_recovery2.ps1
+    update_test_recovery3.py
+    verify_data.py
+    verify_dev_db.py
+    verify_migration.py
+    verify_migration2.py
+scripts
+    .gitkeep
+    baseline_inspect.py
+    browser-test-procedure.md
+    browser-test-setup.ps1
+    db_counts.py
+    enumerate_routes.py
+    inspect_db.py
+    repro_test.py
+tests
+    __init__.py
+    test_activity.py
+    test_ai_tasks.py
+    test_ai_tasks_api.py
+    test_alembic.py
+    test_capabilities.py
+    test_database.py
+    test_delete.py
+    test_download.py
+    test_file_rename_move.py
+    test_files.py
+    test_google_drive_auth.py
+    test_google_drive_credentials.py
+    test_google_drive_delete.py
+    test_google_drive_download.py
+    test_google_drive_endpoints.py
+    test_google_drive_file_endpoints.py
+    test_google_drive_rename_move.py
+    test_google_drive_root_folder.py
+    test_google_drive_upload.py
+    test_health.py
+    test_local_adapter.py
+    test_recovery.py
+    test_recovery_backup.py
+    test_stage_a_migration.py
+    test_startup_gate.py
+    test_storage_errors.py
+    test_storage_interfaces_registry.py
+    test_storage_types.py
+    test_uploads.py
+uploads
+    .quarantine
+    0cf24a0312834b95a8b98cd7969b8aba.txt
+    502562e0211f4304ad1c5b08bf6b490a.txt
+    6aa3a12d0678473eaa1e28784312ebbc.pdf
+    94d2ff810553403db9b33cdd1b7b1047.txt
+    9e72225d-bb40-4151-a0ff-56ba40da21dc.pdf
+    ae73566b6798443ab7e7238f6c53db21.txt
+    c991025ac79747ea96cc20f5ab58ce40.pdf
+    d26b6d21108c47998ca58ac28c757508.txt
+.env
+.env.cors_test
+.env.example
+.gitattributes
+.gitignore
+AGENTS.md
+alembic.ini
+alembic_temp.db
+apply_delete_impl.py
+apply_download.py
+apply_rename_move.py
+fix_content_disposition.py
+fix_content_disposition2.py
+fix_continuation.py
+now_ts
+output.txt
+pyproject.toml
+README.md
+repair_chains.py
+repair_google_drive.py
+repair_move_get.py
+requirements.txt
+revert_files_endpoint.py
+silo_vault.db
+silo_vault.db.pre_alembic_20261110_213645.bak
+silo_vault_backup_20261110_112641.db
+silo_vault_backup_20261110_112653.db
+silo_vault_backup_20261110_112709.db
+SILOVAULT_STRUCTURE.txt
+start.bat
+start-local.bat
+test_migration_0329630b3eb145f0a8bc2b7eb342aead.db
+test_migration_065e9bb49bbf4f2fbfa92bce29ba1061.db
+test_migration_09069d5dd726436f97f5f32eb21c873f.db
+test_migration_0a1cf53843e24b93a376e37365a04aac.db
+test_migration_0fc53048a642405592630d59fdf20c71.db
+test_migration_1693307f82974d5bbf10bef046eedd76.db
+test_migration_18a38cb9a86046a79db53211f138cd49.db
+test_migration_19eb29e8bd724ce9a24e4b18e6fbb679.db
+test_migration_19fea05c0bd24ad7b923917141670d83.db
+test_migration_1cd864ad63f24e90a9de2ed9b187a05c.db
+test_migration_23fc3b96cebc4ef68682b9caddac3646.db
+test_migration_2bb1846f9d054fdcaaa6b07dfbfd20b9.db
+test_migration_39280b2d615e43fe91020c61726a59c7.db
+test_migration_3de82969304447ffaf98cdaa234b9e9a.db
+test_migration_46a2b496949648d9bdce8a405ca679e5.db
+test_migration_4e0580b020914cea845a2c836a68480a.db
+test_migration_535f42211441486ca0bd7d39717d7a28.db
+test_migration_5a177c4808104d3ba504b9b43417ee03.db
+test_migration_5d95d7a89c25442c94a5edb5154eb5c8.db
+test_migration_60390aa122af4d199a815ed1708c3f3a.db
+test_migration_60ac4d0718ca4d36aef73538c377dc89.db
+test_migration_612abb04d8cb40e3b6ac13503848060e.db
+test_migration_62f471a8d335428e911a4fe756872f5c.db
+test_migration_63b8fb079fa3475ca1c50197dde1bf0b.db
+test_migration_670ae12380a94bb1b69ed0c4419e0515.db
+test_migration_6ae088fabb5445a4aae48fa75a0802b1.db
+test_migration_6b238dfde4ad41ca9577c24f826adc0e.db
+test_migration_6ed64dcd04304baca465a3706f8d2ff3.db
+test_migration_752ebb3cbbc047a495359850986a1652.db
+test_migration_75b1fac41106425ca058cede5fcba079.db
+test_migration_75d78a559ce6430f965a135dfd86a59a.db
+test_migration_7612fb118e5d4dbaa2e1007ee2e215e1.db
+test_migration_77c27728d1024aaa8aede0632d88fc71.db
+test_migration_77cc36e6483341acba33766f32ef38cc.db
+test_migration_78eeef2d89e44862a602df07cc88fbd8.db
+test_migration_7c4962e46a6b448f8a6815411c36e6e9.db
+test_migration_7d4bf1b9538044f7884c39af241adaaf.db
+test_migration_7f97553371a14ec8b2c4a276006a74f9.db
+test_migration_842b4e807afc4509a622de6cb4e2c509.db
+test_migration_8762b2818ded44aba295bc0daa29077f.db
+test_migration_8c1162e14e8c445ba1ff93d792aeda69.db
+test_migration_8c96367570d144c292084f70ce4afc1d.db
+test_migration_8d1b3c18550246a08cb7ec5cbd51ff6d.db
+test_migration_91eeea8d89e64a54ad1ab2e7e3d0c4f3.db
+test_migration_9b156cecd3ec4aafbf78798c5d568f62.db
+test_migration_a2dccbb8cba3445a96615f726bb4b405.db
+test_migration_a3f540d9762e452491d14f4b499f4370.db
+test_migration_a5d27237f1f24d10b86466c786bcdcf4.db
+test_migration_a740302d1c84463db41466a9055c5568.db
+test_migration_ade80798e9bd4fd8a77d5999e49b9b27.db
+test_migration_af55ae0c86814e9d9fd650c1c3bb4282.db
+test_migration_c1d71bc0d8c04d78bb5ac336ba167bd6.db
+test_migration_c283df506c2845eea648d72c62987927.db
+test_migration_ca366daeee5c468ab3abfd70359e116d.db
+test_migration_cde5c1b527e24890b26eb3a58ebdfc05.db
+test_migration_d26ddf1dc771497f92c575229651c4fc.db
+test_migration_d8a09dc15c194dd1b72e54feb40d3db1.db
+test_migration_d989872a5a5c4fbb96fa273335d8ea8d.db
+test_migration_db4bfb43f967456ea54ed51a6de6d8c0.db
+test_migration_db83ee8866b24aa694642d833d1688ca.db
+test_migration_de1c100590114d4eb4526f0a288f1d40.db
+test_migration_df285a622d1543bca2868eb74a2db7a2.db
+test_migration_f139f9fa0a684b66ade6604e914853fb.db
+test_migration_f32963c0c0df44a1b9a8dc614dfb1874.db
+test_migration_f7f9ee07b6fd4c73b315bbc511d9151b.db
+test_migration_fb1df174b40649638bfdc92b927e7ab9.db
+test_migration_fc500aedcd11455ab62168cd112896f3.db
+test_migration_fcc0fe4fa57046d696d2bf95c4b02397.db
+update_files_endpoint.py
+update_google_drive.py

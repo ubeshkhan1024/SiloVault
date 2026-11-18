@@ -30,8 +30,10 @@ from backend.storage.credentials import (
     load_google_drive_credentials,
     store_google_drive_credentials,
 )
+from backend.storage.capabilities import CAPABILITY_MAP
 from backend.storage.errors import StorageAuthenticationError
 from backend.storage.google_drive import GoogleDriveAdapter
+from backend.storage.registry import register, remove
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,11 @@ router = APIRouter(prefix="/google-drive", tags=["google-drive"])
 # Module-level state for the active connection
 _adapter: GoogleDriveAdapter | None = None
 _lock = threading.Lock()
+
+# Tracks whether startup auto-authentication failed so /status can report
+# actionable errors (token_invalid, refresh_failed) instead of generic
+# disconnected. Cleared on successful connect or disconnect.
+_startup_auth_failure_reason: str | None = None
 
 
 def _get_adapter() -> GoogleDriveAdapter | None:
@@ -50,6 +57,12 @@ def _get_adapter() -> GoogleDriveAdapter | None:
 def _set_adapter(adapter: GoogleDriveAdapter | None) -> None:
     global _adapter
     _adapter = adapter
+
+
+def _set_startup_auth_failure(reason: str | None) -> None:
+    """Record (or clear) a startup authentication failure reason."""
+    global _startup_auth_failure_reason
+    _startup_auth_failure_reason = reason
 
 
 def _pick_free_port() -> int:
@@ -297,6 +310,10 @@ def _run_oauth_flow() -> dict:
 
     with _lock:
         _set_adapter(adapter)
+        # Register in the shared storage registry so business endpoints
+        # (uploads, files, recovery) can locate the provider.
+        register("GOOGLE_DRIVE", adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+        _set_startup_auth_failure(None)  # success clears any prior failure
 
     return {"success": True, "error": None}
 
@@ -378,6 +395,15 @@ async def get_connection_status():
     if adapter is None:
         # Check if credentials exist in keyring but adapter isn't initialized
         if has_google_drive_credentials():
+            if _startup_auth_failure_reason is not None:
+                return {
+                    "connected": False,
+                    "status": "token_invalid",
+                    "message": (
+                        "Stored credentials could not be validated on startup. "
+                        "Please reconnect."
+                    ),
+                }
             return {
                 "connected": False,
                 "status": "credentials_stored",
@@ -435,6 +461,14 @@ async def disconnect_google_drive():
 
     with _lock:
         _set_adapter(None)
+        _set_startup_auth_failure(None)  # clear failure state on disconnect
+
+    # Remove from shared storage registry so business endpoints stop seeing it.
+    try:
+        remove("GOOGLE_DRIVE")
+    except Exception:
+        # Safe to ignore if already unregistered — caller should not care.
+        logger.debug("GOOGLE_DRIVE already absent from shared registry")
 
     # Delete stored credentials
     try:

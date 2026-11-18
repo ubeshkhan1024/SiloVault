@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.api.v1.endpoints import google_drive as gd_endpoints
+from backend.storage.interfaces import StorageOperations
 
 
 # ---------------------------------------------------------------------------
@@ -64,13 +65,36 @@ def _mock_oauth_flow(monkeypatch: pytest.MonkeyPatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_gd_registry(monkeypatch: pytest.MonkeyPatch):
+    """Remove GOOGLE_DRIVE from the shared registry after each test.
+
+    Prevents test-order-dependent failures when tests manually register
+    the provider.
+    """
+    yield
+    # Clean up any GOOGLE_DRIVE registration left by the test
+    try:
+        from backend.storage.registry import remove
+        remove("GOOGLE_DRIVE")
+    except Exception:
+        pass
+    # Also clear the module-level adapter reference
+    gd_endpoints._set_adapter(None)
+    # Clear any startup auth failure tracking
+    gd_endpoints._startup_auth_failure_reason = None
+
+
 # ---------------------------------------------------------------------------
 # Tests: /connect endpoint
 # ---------------------------------------------------------------------------
 
 
-def test_connect_google_drive_no_configuration():
+def test_connect_google_drive_no_configuration(monkeypatch: pytest.MonkeyPatch):
     """POST /google-drive/connect returns 503 when client_id/secret missing."""
+    # Clear credentials so the test stays valid even when a .env file exists.
+    monkeypatch.setattr(gd_endpoints.settings, "google_drive_client_id", None)
+    monkeypatch.setattr(gd_endpoints.settings, "google_drive_client_secret", None)
     client = TestClient(app, raise_server_exceptions=False)
     response = client.post("/api/v1/google-drive/connect")
     assert response.status_code == 503
@@ -165,6 +189,46 @@ def test_status_google_drive_credentials_stored():
             payload = response.json()
             assert payload["connected"] is False
             assert payload["status"] == "credentials_stored"
+
+
+def test_status_google_drive_token_invalid_after_startup_failure():
+    """When startup auth fails, status returns token_invalid with reconnect hint."""
+    client = TestClient(app, raise_server_exceptions=False)
+    # Simulate what main.py does after a failed startup authenticate
+    gd_endpoints._startup_auth_failure_reason = "Failed to refresh Google Drive token: invalid_grant"
+    try:
+        with patch(
+            "backend.api.v1.endpoints.google_drive._get_adapter",
+            return_value=None,
+        ):
+            with patch(
+                "backend.api.v1.endpoints.google_drive.has_google_drive_credentials",
+                return_value=True,
+            ):
+                response = client.get("/api/v1/google-drive/status")
+                assert response.status_code == 200
+                payload = response.json()
+                assert payload["connected"] is False
+                assert payload["status"] == "token_invalid"
+                assert "reconnect" in payload["message"].lower()
+    finally:
+        gd_endpoints._startup_auth_failure_reason = None
+
+
+def test_status_google_drive_clears_failure_on_disconnect():
+    """Disconnect must clear any prior startup auth failure reason."""
+    from backend.storage.capabilities import CAPABILITY_MAP
+    from backend.storage.registry import register
+
+    mock_gd = _gd_stub()
+    gd_endpoints._set_adapter(mock_gd)
+    register("GOOGLE_DRIVE", mock_gd, CAPABILITY_MAP["GOOGLE_DRIVE"])
+    gd_endpoints._startup_auth_failure_reason = "some-error"
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.delete("/api/v1/google-drive/disconnect")
+    assert resp.status_code == 204
+    assert gd_endpoints._startup_auth_failure_reason is None
 
 
 # ---------------------------------------------------------------------------
@@ -389,3 +453,134 @@ def test_oob_error_param_recorded():
     handler_cls = _make_callback_handler("my-state", outcome)
     _call_handler_do_get(handler_cls, "/?error=access_denied")
     assert outcome.get("error") == "access_denied"
+
+
+# ---------------------------------------------------------------------------
+# Tests: shared registry registration (the bug fix)
+# ---------------------------------------------------------------------------
+
+
+class _GDStubAdapter(StorageOperations):
+    """Minimal adapter satisfying StorageOperations for registry tests."""
+
+    def upload(self, file_data, name, logical_path):
+        from backend.storage.types import ProviderFileRecord
+        return ProviderFileRecord(
+            provider_file_id="stub-id", name=name, logical_path=logical_path,
+            mime_type="text/plain", size_bytes=len(file_data),
+        )
+
+    def download(self, provider_file_id):
+        return b"stub-data"
+
+    def rename(self, provider_file_id, new_name):
+        from backend.storage.types import ProviderFileRecord
+        return ProviderFileRecord(provider_file_id=provider_file_id, name=new_name,
+                                  logical_path="/stub", mime_type="text/plain", size_bytes=8)
+
+    def move(self, source_id, target_path):
+        from backend.storage.types import ProviderFileRecord
+        return ProviderFileRecord(provider_file_id=source_id, name="moved",
+                                  logical_path=target_path, mime_type="text/plain", size_bytes=5)
+
+    def quarantine(self, provider_file_id):
+        return f"quarantine-of-{provider_file_id}"
+
+    def restore(self, quarantine_id):
+        from backend.storage.types import ProviderFileRecord
+        return ProviderFileRecord(provider_file_id=quarantine_id, name="restored",
+                                  logical_path="/stub", mime_type="text/plain", size_bytes=8)
+
+    def cleanup(self, quarantine_id):
+        pass
+
+    def authenticate(self, config):
+        pass
+
+    def refresh(self):
+        pass
+
+    def disconnect(self):
+        pass
+
+
+def _gd_stub():
+    """Return a fresh StorageOperations-compatible stub for testing."""
+    return _GDStubAdapter()
+
+
+def test_upload_lookup_succeeds_after_manual_connect():
+    """After a simulated connection, lookup("GOOGLE_DRIVE") must work for uploads."""
+    from backend.storage.registry import lookup
+
+    mock_adapter = _gd_stub()
+    gd_endpoints._set_adapter(mock_adapter)
+    from backend.storage.capabilities import CAPABILITY_MAP
+    from backend.storage.registry import register
+    register("GOOGLE_DRIVE", mock_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    # Simulate what the upload endpoint does: lookup the provider
+    adapter, caps = lookup("GOOGLE_DRIVE")
+    assert adapter is mock_adapter
+    assert caps is CAPABILITY_MAP["GOOGLE_DRIVE"]
+
+
+def test_disconnect_unregisters_from_shared_registry():
+    """DELETE /disconnect must remove GOOGLE_DRIVE from the shared registry."""
+    from backend.storage.errors import StorageUnavailableError
+    from backend.storage.capabilities import CAPABILITY_MAP
+    from backend.storage.registry import lookup, register
+
+    mock_adapter = _gd_stub()
+    gd_endpoints._set_adapter(mock_adapter)
+    register("GOOGLE_DRIVE", mock_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.delete("/api/v1/google-drive/disconnect")
+    assert resp.status_code == 204
+
+    with pytest.raises(StorageUnavailableError, match="Unregistered"):
+        lookup("GOOGLE_DRIVE")
+
+    assert gd_endpoints._get_adapter() is None
+
+
+def test_disconnect_twice_is_safe():
+    """A second disconnect when already disconnected must return 404 without error."""
+    from backend.storage.capabilities import CAPABILITY_MAP
+    from backend.storage.registry import register
+
+    mock_adapter = _gd_stub()
+    gd_endpoints._set_adapter(mock_adapter)
+    register("GOOGLE_DRIVE", mock_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp1 = client.delete("/api/v1/google-drive/disconnect")
+    assert resp1.status_code == 204
+
+    resp2 = client.delete("/api/v1/google-drive/disconnect")
+    assert resp2.status_code == 404
+
+
+def test_google_drive_disconnect_does_not_affect_local():
+    """Disconnecting Google Drive leaves LOCAL adapter intact in the shared registry."""
+    from backend.storage.registry import lookup as registry_lookup
+
+    try:
+        local_adapter, _ = registry_lookup("LOCAL")
+    except Exception:
+        pytest.skip("LOCAL adapter not registered (no app lifespan)")
+        return
+
+    mock_gd_adapter = _gd_stub()
+    from backend.storage.capabilities import CAPABILITY_MAP
+    from backend.storage.registry import register
+    gd_endpoints._set_adapter(mock_gd_adapter)
+    register("GOOGLE_DRIVE", mock_gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    client = TestClient(app, raise_server_exceptions=False)
+    client.delete("/api/v1/google-drive/disconnect")
+
+    rechecked_adapter, _ = registry_lookup("LOCAL")
+    assert rechecked_adapter is local_adapter

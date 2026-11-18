@@ -232,6 +232,7 @@ def test_restore_successful_returns_record(_fake_keyring):
         "size": "2048",
         "modifiedTime": "2024-06-15T10:00:00Z",
         "md5Checksum": "abc123",
+        "parents": ["folder-123"],
     }
 
     result = adapter.restore("file-restore-1")
@@ -245,6 +246,7 @@ def test_restore_successful_returns_record(_fake_keyring):
     assert result.sha256 is None
     assert result.provider_metadata["md5_checksum"] == "abc123"
     assert result.modified_at is not None
+    assert result.provider_metadata["parent_ids"] == ["folder-123"]
 
     # Verify trashed=False was sent
     files_mock.update.assert_called_once_with(
@@ -351,6 +353,74 @@ def test_restore_does_not_delete_file(_fake_keyring):
     adapter.restore("file-123")
 
     files_mock.delete.assert_not_called()
+
+
+def test_restore_metadata_request_includes_parents_field(_fake_keyring):
+    """The metadata GET call requests the 'parents' field so parent IDs can be
+    preserved in the returned ProviderFileRecord."""
+    _seed_credentials()
+    adapter = _make_authenticated_adapter()
+    files_mock = adapter._drive_service.files.return_value
+    files_mock.update.return_value.execute.return_value = {}
+    files_mock.get.return_value.execute.return_value = {
+        "id": "file-123",
+        "name": "restored.pdf",
+        "mimeType": "application/pdf",
+        "size": "100",
+        "modifiedTime": "2024-06-15T10:00:00Z",
+        "md5Checksum": "abc123",
+    }
+
+    adapter.restore("file-123")
+
+    # The second call is files().get(...).execute()
+    get_call = files_mock.get.call_args
+    fields_param = get_call.kwargs.get("fields", "")
+    assert "parents" in fields_param
+
+
+def test_restore_missing_parents_yields_empty_list(_fake_keyring):
+    """When the Drive API response omits the 'parents' field entirely,
+    provider_metadata['parent_ids'] defaults to an empty list."""
+    _seed_credentials()
+    adapter = _make_authenticated_adapter()
+    files_mock = adapter._drive_service.files.return_value
+    files_mock.update.return_value.execute.return_value = {}
+    files_mock.get.return_value.execute.return_value = {
+        "id": "file-no-parents",
+        "name": "standalone.pdf",
+        "mimeType": "application/pdf",
+        "size": "512",
+        "modifiedTime": "2024-07-01T08:00:00Z",
+        "md5Checksum": "def456",
+        # No 'parents' key at all
+    }
+
+    result = adapter.restore("file-no-parents")
+
+    assert result.provider_metadata["parent_ids"] == []
+
+
+def test_restore_metadata_get_failure_after_untrash_raises_mapped_error(_fake_keyring):
+    """If the untrash update succeeds but the subsequent metadata GET fails,
+    the error is mapped and raised (do not silently return a record with
+    unverified metadata)."""
+    _seed_credentials()
+    adapter = _make_authenticated_adapter()
+    adapter._drive_service.files.return_value.update.return_value.execute.return_value = {}
+    adapter._drive_service.files.return_value.get.return_value.execute.side_effect = (
+        _make_http_error(404, "File not found")
+    )
+
+    with pytest.raises(StorageNotFoundError) as excinfo:
+        adapter.restore("missing-after-untrash")
+    assert excinfo.value.provider == "GOOGLE_DRIVE"
+
+    # The untrash was already attempted before the metadata GET failed
+    adapter._drive_service.files.return_value.update.assert_called_once_with(
+        fileId="missing-after-untrash",
+        body={"trashed": False},
+    )
 
 
 # ---------------------------------------------------------------------------

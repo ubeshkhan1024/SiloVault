@@ -12,6 +12,26 @@ import { SiloVaultAPI } from "./api.js";
 // while an upload is running to avoid overwhelming the local backend.
 let _isUploading = false;
 
+// Default storage provider for uploads. Can be changed by calling
+// setUploadProvider() or via the UI selector on the Uploads view.
+let _selectedProvider = "LOCAL";
+
+/**
+ * Return the current default upload provider.
+ * @returns {string}
+ */
+export function getUploadProvider() {
+    return _selectedProvider;
+}
+
+/**
+ * Update the default upload provider.
+ * @param {string} provider - Canonical provider ID (e.g. "LOCAL", "GOOGLE_DRIVE").
+ */
+export function setUploadProvider(provider) {
+    _selectedProvider = String(provider || "LOCAL").toUpperCase();
+}
+
 export function initUploadsView() {
     const uploadZone = document.getElementById("upload-zone");
     const fileInput = document.getElementById("file-input");
@@ -20,6 +40,16 @@ export function initUploadsView() {
 
     if (!fileInput) {
         return;
+    }
+
+    // Wire up the provider selector if present on the page.
+    const providerSelect = document.getElementById("upload-provider-select");
+    if (providerSelect) {
+        providerSelect.addEventListener("change", (event) => {
+            setUploadProvider(event.target.value);
+        });
+        // Sync internal state with whatever the select currently holds.
+        setUploadProvider(providerSelect.value);
     }
 
     // The "+ Upload" topbar button opens the file picker.
@@ -120,7 +150,7 @@ async function uploadSingleFile(file, entry) {
     setStatus(entry, "uploading", "Uploading…");
 
     try {
-        const result = await SiloVaultAPI.uploadFile(file);
+        const result = await SiloVaultAPI.uploadFile(file, _selectedProvider);
 
         if (result === null) {
             setStatus(entry, "failed", "Failed (network error)");

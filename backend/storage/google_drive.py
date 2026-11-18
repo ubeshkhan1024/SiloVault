@@ -20,7 +20,7 @@ import logging
 import threading
 from datetime import datetime
 from typing import Any, Optional
-
+from google.auth.exceptions import RefreshError
 from google.auth import credentials as ga_credentials
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -155,9 +155,21 @@ class GoogleDriveAdapter(StorageOperations, StorageLifecycle):
         # Attempt to refresh the token to validate credentials
         try:
             creds.refresh(Request())
+        except RefreshError as exc:
+            if "invalid_grant" in str(exc).lower():
+                raise StorageAuthenticationError(
+                    detail=f"Google Drive credentials are invalid: {exc}",
+                    provider="GOOGLE_DRIVE",
+                ) from exc
+
+            raise StorageUnavailableError(
+                detail=f"Google Drive token refresh failed: {exc}",
+                provider="GOOGLE_DRIVE",
+            ) from exc
+
         except Exception as exc:
-            raise StorageAuthenticationError(
-                detail=f"Failed to refresh Google Drive token: {exc}",
+            raise StorageUnavailableError(
+                detail=f"Google Drive authentication service unavailable: {exc}",
                 provider="GOOGLE_DRIVE",
             ) from exc
 
@@ -670,7 +682,7 @@ class GoogleDriveAdapter(StorageOperations, StorageLifecycle):
             response = (
                 self._drive_service.files().get(
                     fileId=quarantine_id,
-                    fields="id,name,mimeType,size,modifiedTime,md5Checksum",
+                    fields="id,name,mimeType,size,modifiedTime,md5Checksum,parents",
                 )                .execute()
             )
         except HttpError as exc:
@@ -693,6 +705,7 @@ class GoogleDriveAdapter(StorageOperations, StorageLifecycle):
                 "md5_checksum": response.get("md5Checksum"),
                 "web_view_link": f"https://drive.google.com/file/d/{file_id}/view",
                 "web_content_link": f"https://drive.google.com/uc?id={file_id}&export=download",
+                "parent_ids": response.get("parents", []),
             },
             modified_at=_parse_drive_timestamp(response.get("modifiedTime")),
         )

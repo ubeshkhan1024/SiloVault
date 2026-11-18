@@ -89,10 +89,14 @@ export const SiloVaultAPI = {
      * produce an invalid request body.
      *
      * @param {File} file - The File object to upload.
+     * @param {string} [provider="LOCAL"] - Storage provider identifier
+     *     (e.g. "LOCAL", "GOOGLE_DRIVE"). Sent as a query parameter.
      * @returns {object|null} Parsed JSON response on success, null on error.
      */
-    async uploadFile(file) {
-        const url = `${this.baseUrl}${this.apiPrefix}/uploads`;
+    async uploadFile(file, provider = "LOCAL") {
+        const urlObj = new URL(`${this.baseUrl}${this.apiPrefix}/uploads`);
+        urlObj.searchParams.set("provider", provider);
+        const url = urlObj.toString();
         try {
             const formData = new FormData();
             // Field name must match the backend endpoint expectation.

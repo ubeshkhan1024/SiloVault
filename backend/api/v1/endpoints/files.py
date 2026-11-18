@@ -194,15 +194,18 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
 
 @router.delete("/{file_id}", status_code=204)
 async def delete_file(file_id: str, db: Session = Depends(get_db)):
-    """Delete a locally stored file and its metadata record.
+    """Delete a file and its metadata record through the appropriate provider.
 
     Security guarantees:
-    - Only records with ``provider='LOCAL'`` can be deleted.
-    - The physical path is derived exclusively from
+    - The adapter for ``record.provider`` is resolved and used exclusively;
+      the client-supplied ``file_id`` resolves only a database row.
+    - For LOCAL records the physical path is derived exclusively from
       ``record.provider_file_id`` (a server-generated UUID filename).
-    - The resolved path must be strictly inside the configured
+    - For LOCAL records the resolved path must be strictly inside the configured
       ``uploads_dir``; traversal, absolute paths, and symlink escapes are
       rejected.
+    - For cloud providers the provider-assigned identifier is passed through
+      to that provider's adapter verbatim.
     - Quarantine/restore/cleanup protocol ensures the original file is never
       lost if the database commit fails: the file is first quarantined, then
       the DB record is deleted and committed. On success the quarantine file
@@ -211,11 +214,13 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
       normal API endpoints.
     - Pending deletion records survive application crashes and are processed
       by the recovery service on startup or by background workers.
+    - An unregistered or unavailable adapter returns HTTP 503; the record
+      is not deleted.
 
     Returns:
     - 204 No Content on success.
     - 404 if the record does not exist or the physical file is missing.
-    - 400 for non-LOCAL providers or invalid paths.
+    - 503 if the storage provider is unavailable or not registered.
     """
     record = db.get(UnifiedFileRecord, file_id)
     if record is None:
@@ -224,30 +229,34 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
             detail=f"File with id '{file_id}' was not found.",
         )
 
-    if record.provider != "LOCAL":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Deletion is only supported for LOCAL provider records. "
-                f"Provider '{record.provider}' is not eligible."
-            ),
-        )
-
-    # Snapshot the original filename BEFORE the DB record is removed. The
-    # delete activity must remain identifiable even after the file record is
-    # gone, so we keep this snapshot rather than a foreign key.
-    deleted_file_name = record.name
-    deleted_provider = record.provider
-    provider_file_id = record.provider_file_id
-
-    # Get LOCAL adapter from registry
+    # Resolve the appropriate storage adapter for the record's provider.
     try:
-        adapter, _ = lookup("LOCAL")
-    except Exception as exc:
+        adapter, _ = lookup(record.provider)
+    except StorageUnavailableError as exc:
         raise HTTPException(
             status_code=503,
             detail=f"Storage provider unavailable: {exc}",
         ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to resolve storage provider: {exc}",
+        ) from exc
+
+    # Snapshot metadata BEFORE the DB record is removed. The
+    # delete activity and recovery/restore pipeline must remain identifiable
+    # and reconstructible even after the file record is gone.
+    deleted_file_name = record.name
+    deleted_provider = record.provider
+    provider_file_id = record.provider_file_id
+    provider_account_id = record.provider_account_id
+    original_file_id = record.id
+    original_logical_path = record.logical_path
+    original_mime_type = record.mime_type
+    original_size_bytes = record.size_bytes
+    original_sha256 = record.sha256
+    original_category = record.category
+    original_tags = record.tags
 
     # Phase 1: Quarantine the physical file
     try:
@@ -271,7 +280,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
     pending = PendingDeletion(
         provider=deleted_provider,
-        provider_account_id=None,
+        provider_account_id=provider_account_id,
         provider_file_id=provider_file_id,
         quarantine_id=quarantine_id,
         file_name_snapshot=deleted_file_name,
@@ -284,16 +293,24 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
         created_at=datetime.now(timezone.utc),
         last_attempted_at=None,
         next_retry_at=None,
+        operation_type="CLEANUP",
+        original_file_id=original_file_id,
+        original_logical_path=original_logical_path,
+        original_mime_type=original_mime_type,
+        original_size_bytes=original_size_bytes,
+        original_sha256=original_sha256,
+        original_category=original_category,
+        original_tags=original_tags,
     )
     db.add(pending)
     db.add(record)  # will be deleted below
     try:
         db.delete(record)
         db.commit()
+
     except Exception as db_exc:
         db.rollback()
-        # Phase 3b: DB commit failed -- restore the quarantined file
-        # and remove the pending deletion (rolled back with db.rollback)
+
         try:
             adapter.restore(quarantine_id)
         except Exception as restore_exc:
@@ -302,9 +319,52 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
                 quarantine_id,
                 restore_exc,
             )
+
+            try:
+                restore_pending = PendingDeletion(
+                    provider=deleted_provider,
+                    provider_account_id=provider_account_id,
+                    provider_file_id=provider_file_id,
+                    quarantine_id=quarantine_id,
+                    file_name_snapshot=deleted_file_name,
+                    status="PENDING",
+                    retry_count=0,
+                    last_error=str(restore_exc),
+                    operation_type="RESTORE",
+                    original_file_id=original_file_id,
+                    original_logical_path=original_logical_path,
+                    original_mime_type=original_mime_type,
+                    original_size_bytes=original_size_bytes,
+                    original_sha256=original_sha256,
+                    original_category=original_category,
+                    original_tags=original_tags,
+                )
+                db.add(restore_pending)
+                db.commit()
+            except Exception as recovery_commit_exc:
+                db.rollback()
+                logging.critical(
+                    "delete_file: failed to persist RESTORE recovery record "
+                    "for quarantine %s: %s",
+                    quarantine_id,
+                    recovery_commit_exc,
+                    exc_info=True,
+                )
+                detail = (
+                    "Database deletion and immediate restoration failed. "
+                    "Recovery could not be queued; manual recovery may be required."
+                )
+            else:
+                detail = (
+                    "Database deletion and immediate restoration failed. "
+                    "A recovery retry has been queued."
+                )
+
+            raise HTTPException(status_code=500, detail=detail) from db_exc
+
         raise HTTPException(
             status_code=500,
-            detail="Failed to delete the metadata record; the file has been restored.",
+            detail="Database deletion failed; the original file was successfully restored.",
         ) from db_exc
 
     # Phase 3a: Commit succeeded -- call adapter.cleanup to permanently

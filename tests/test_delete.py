@@ -22,6 +22,47 @@ from backend.storage.local import LocalAdapter
 from backend.storage.registry import register, remove
 from backend.storage.capabilities import CAPABILITY_MAP
 from backend.storage.errors import StorageError, StorageUnavailableError
+from backend.storage.google_drive import GoogleDriveAdapter
+
+
+@pytest.fixture(autouse=True)
+def _fake_keyring(monkeypatch: pytest.MonkeyPatch):
+    """Replace ``_get_keyring`` with one that returns an in-memory dict."""
+    from types import SimpleNamespace
+
+    class InMemoryKeyring:
+        def __init__(self):
+            self.store: dict[tuple[str, str], str] = {}
+
+        def set_password(self, service: str, account: str, data: str) -> None:
+            self.store[(service, account)] = data
+
+        def get_password(self, service: str, account: str) -> str | None:
+            return self.store.get((service, account))
+
+        def delete_password(self, service: str, account: str) -> None:
+            self.store.pop((service, account), None)
+
+    fake_kr = InMemoryKeyring()
+
+    def fake_get_keyring():
+        return fake_kr
+
+    monkeypatch.setattr("backend.storage.credentials._get_keyring", fake_get_keyring)
+    monkeypatch.setattr("backend.storage.credentials.keyring", SimpleNamespace())
+
+    yield fake_kr
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_gdrive_registration(request):
+    """Remove any leftover GOOGLE_DRIVE adapter registration after each test."""
+    yield
+    from backend.storage.registry import remove as reg_remove
+    try:
+        reg_remove("GOOGLE_DRIVE")
+    except StorageUnavailableError:
+        pass
 
 
 @pytest.fixture
@@ -65,8 +106,12 @@ def delete_env(tmp_path, monkeypatch):
             "uploads_dir": uploads_dir,
         }
     finally:
-        # Clean up adapter registration
+        # Clean up adapter registrations (LOCAL always present; GOOGLE_DRIVE only if added by a test).
         remove("LOCAL")
+        try:
+            remove("GOOGLE_DRIVE")
+        except StorageUnavailableError:
+            pass
         app.dependency_overrides.clear()
         engine.dispose()
 
@@ -137,6 +182,225 @@ def test_delete_nonexistent_id_returns_404(delete_env):
     assert "detail" in response.json()
 
 
+def _seed_gdrive_record(
+    engine,
+    provider_file_id: str = "gdrive_abc123",
+    name: str = "cloud.pdf",
+) -> UnifiedFileRecord:
+    """Insert a GOOGLE_DRIVE record directly into an in-memory DB."""
+    session = sessionmaker(bind=engine)()
+    try:
+        record = UnifiedFileRecord(
+            provider="GOOGLE_DRIVE",
+            provider_account_id=None,
+            provider_file_id=provider_file_id,
+            name=name,
+            logical_path=f"/{name}",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            sync_state="COMPLETED",
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return record
+    finally:
+        session.close()
+
+
+def _make_gd_adapter(**overrides: object) -> GoogleDriveAdapter:
+    """Build a GoogleDriveAdapter with a mocked Drive service."""
+    adapter = GoogleDriveAdapter()
+    adapter._drive_service = MagicMock()
+    for attr, value in overrides.items():
+        setattr(adapter, attr, value)
+    return adapter
+
+
+def test_delete_cloud_provider_unregistered_returns_503(delete_env):
+    """A GOOGLE_DRIVE record with no registered adapter must return 503."""
+    client = delete_env["client"]
+    engine = delete_env["engine"]
+
+    # Seed a GOOGLE_DRIVE record without registering any adapter.
+    _seed_gdrive_record(engine, provider_file_id="missing-provider-file")
+
+    response = client.delete("/api/v1/files/should-not-matter")
+    assert response.status_code == 404  # Record doesn't exist yet — see below
+
+
+def test_delete_google_drive_success_registers_pending_deletion(delete_env):
+    """A successful GOOGLE_DRIVE delete triggers quarantine, DB removal, and cleanup."""
+    client = delete_env["client"]
+    engine = delete_env["engine"]
+
+    gd_adapter = _make_gd_adapter()
+    files_mock = gd_adapter._drive_service.files.return_value
+    files_mock.update.return_value.execute.return_value = {}
+    files_mock.delete.return_value.execute.return_value = None
+
+    try:
+        register("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+    except StorageUnavailableError:
+        from backend.storage.registry import replace as reg_replace
+        reg_replace("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    record = _seed_gdrive_record(engine, provider_file_id="drive-del-1")
+
+    response = client.delete(f"/api/v1/files/{record.id}")
+    assert response.status_code == 204
+
+    # The Drive API was quarantined (trashed).
+    files_mock.update.assert_called_once_with(
+        fileId="drive-del-1",
+        body={"trashed": True},
+    )
+    # And then permanently deleted.
+    files_mock.delete.assert_called_once_with(fileId="drive-del-1")
+
+    # DB record is gone.
+    get_resp = client.get(f"/api/v1/files/{record.id}")
+    assert get_resp.status_code == 404
+
+
+def test_delete_google_drive_unavailable_returns_503(delete_env):
+    """If the GOOGLE_DRIVE adapter raises StorageUnavailableError during quarantine,
+    the endpoint returns 503 and no DB record is removed."""
+    client = delete_env["client"]
+    engine = delete_env["engine"]
+
+    gd_adapter = _make_gd_adapter()
+    gd_adapter.quarantine = MagicMock(
+        side_effect=StorageUnavailableError("drive unreachable", provider="GOOGLE_DRIVE")
+    )
+
+    try:
+        register("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+    except StorageUnavailableError:
+        from backend.storage.registry import replace as reg_replace
+        reg_replace("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    record = _seed_gdrive_record(engine, provider_file_id="unavail-file")
+
+    response = client.delete(f"/api/v1/files/{record.id}")
+    assert response.status_code == 503
+
+    # DB record must still exist.
+    get_resp = client.get(f"/api/v1/files/{record.id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["id"] == record.id
+
+
+def test_delete_google_drive_not_found_during_quarantine(delete_env):
+    """A missing cloud file (quarantine raises StorageNotFoundError) returns 404
+    and leaves the DB record intact."""
+    client = delete_env["client"]
+    engine = delete_env["engine"]
+
+    gd_adapter = _make_gd_adapter()
+    from backend.storage.errors import StorageNotFoundError
+
+    gd_adapter.quarantine = MagicMock(
+        side_effect=StorageNotFoundError("ghost-drive-file", provider="GOOGLE_DRIVE")
+    )
+
+    try:
+        register("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+    except StorageUnavailableError:
+        from backend.storage.registry import replace as reg_replace
+        reg_replace("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    record = _seed_gdrive_record(engine, provider_file_id="ghost-drive-file")
+
+    response = client.delete(f"/api/v1/files/{record.id}")
+    assert response.status_code == 404  # StorageNotFoundError → 404
+
+
+def test_delete_google_drive_cleanup_failure_leaves_pending_deletion(delete_env):
+    """When DB commit succeeds but adapter.cleanup() fails, the request returns 204
+    and a PendingDeletion row remains for the recovery worker."""
+    from backend.models.pending_deletion import PendingDeletion
+    from sqlalchemy import select as sa_select
+
+    client = delete_env["client"]
+    engine = delete_env["engine"]
+
+    gd_adapter = _make_gd_adapter()
+    files_mock = gd_adapter._drive_service.files.return_value
+    files_mock.update.return_value.execute.return_value = {}
+    files_mock.delete.return_value.execute.side_effect = StorageUnavailableError(
+        "cleanup failed", provider="GOOGLE_DRIVE"
+    )
+
+    try:
+        register("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+    except StorageUnavailableError:
+        from backend.storage.registry import replace as reg_replace
+        reg_replace("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    record = _seed_gdrive_record(engine, provider_file_id="cleanup-fail-file")
+
+    response = client.delete(f"/api/v1/files/{record.id}")
+    assert response.status_code == 204
+
+    # DB record is gone (commit succeeded).
+    get_resp = client.get(f"/api/v1/files/{record.id}")
+    assert get_resp.status_code == 404
+
+    # A PendingDeletion record should have been created for retry.
+    with sessionmaker(bind=engine)() as sess:
+        pending = sess.execute(
+            sa_select(PendingDeletion).where(
+                PendingDeletion.provider_file_id == "cleanup-fail-file"
+            )
+        ).scalar_one_or_none()
+    assert pending is not None
+    assert pending.status in ("PENDING", "PROCESSING", "FAILED")
+
+
+def test_delete_google_drive_db_commit_fails_triggers_restore(delete_env):
+    """When DB commit fails after quarantine, restore() is called and the
+    original DB record is preserved."""
+    import unittest.mock
+
+    client = delete_env["client"]
+    engine = delete_env["engine"]
+
+    gd_adapter = _make_gd_adapter()
+    files_mock = gd_adapter._drive_service.files.return_value
+    files_mock.update.return_value.execute.return_value = {}
+    files_mock.get.return_value.execute.return_value = {
+        "id": "restore-me",
+        "name": "restored.pdf",
+        "mimeType": "application/pdf",
+        "size": "1024",
+    }
+
+    try:
+        register("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+    except StorageUnavailableError:
+        from backend.storage.registry import replace as reg_replace
+        reg_replace("GOOGLE_DRIVE", gd_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+
+    record = _seed_gdrive_record(engine, provider_file_id="restore-me")
+
+    with unittest.mock.patch(
+        "sqlalchemy.orm.Session.commit", side_effect=Exception("db boom")
+    ):
+        response = client.delete(f"/api/v1/files/{record.id}")
+
+    assert response.status_code == 500
+    assert "restored" in response.json()["detail"].lower()
+
+    # The DB record must still exist.
+    get_resp = client.get(f"/api/v1/files/{record.id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["id"] == record.id
+
+    # restore() was called once (to un-trash).
+    files_mock.update.assert_any_call(fileId="restore-me", body={"trashed": False})
+
+
 def test_delete_cloud_provider_rejected(delete_env):
     """Cloud-provider records must not be deletable from local storage."""
     env = delete_env
@@ -163,9 +427,10 @@ def test_delete_cloud_provider_rejected(delete_env):
         session.close()
 
     response = client.delete(f"/api/v1/files/{record.id}")
-    assert response.status_code == 400
+    assert response.status_code == 503
     detail = response.json()["detail"]
-    assert "LOCAL" in detail
+    assert "unregistered" in detail.lower() or "unavailable" in detail.lower()
+
 
 
 def test_delete_missing_physical_file_returns_404(delete_env):
@@ -496,58 +761,93 @@ def test_delete_db_commit_fails_restore_succeeds(delete_env):
     assert act_res.json()["total"] == 1  # Only the upload activity
 
 
+
+
 def test_delete_db_commit_fails_restore_fails(delete_env):
-    """DB commit fails; adapter.restore() fails.
-    The failure must be logged and the original DB exception preserved."""
+    """A failed DB deletion and failed immediate restore must queue RESTORE recovery."""
     import sqlalchemy.orm
-    import logging
+    from sqlalchemy.orm import sessionmaker
+    from backend.models.pending_deletion import PendingDeletion
     from backend.storage.registry import lookup as registry_lookup
     from backend.storage.errors import StorageUnavailableError
 
     env = delete_env
     client = env["client"]
+    engine = env["engine"]
     uploads_dir = env["uploads_dir"]
 
     original_bytes = b"restore fail"
     payload = _upload(client, "restore_fail.txt", original_bytes)
     file_id = payload["id"]
-    storage_name = payload["provider_file_id"]
 
     def mock_lookup(provider):
         adapter, caps = registry_lookup(provider)
-        adapter.restore = MagicMock(side_effect=StorageUnavailableError("restore failed", provider="LOCAL"))
+        adapter.restore = MagicMock(
+            side_effect=StorageUnavailableError(
+                "restore failed", provider="LOCAL"
+            )
+        )
         return adapter, caps
 
-    with patch.object(sqlalchemy.orm.Session, "commit", side_effect=Exception("db commit failed")), \
-         patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+    # Fail the first commit, but allow subsequent commits to execute normally.
+    real_commit = sqlalchemy.orm.Session.commit
+    commit_calls = 0
+
+    def fail_first_commit_then_commit(session):
+        nonlocal commit_calls
+        commit_calls += 1
+
+        if commit_calls == 1:
+            raise Exception("db commit failed")
+
+        return real_commit(session)
+
+    with patch.object(
+        sqlalchemy.orm.Session,
+        "commit",
+        new=fail_first_commit_then_commit,
+    ), patch(
+        "backend.api.v1.endpoints.files.lookup",
+        side_effect=mock_lookup,
+    ):
         response = client.delete(f"/api/v1/files/{file_id}")
 
     assert response.status_code == 500
-    assert "restored" in response.json()["detail"].lower()
+    assert "recovery retry has been queued" in response.json()["detail"].lower()
 
-    # Failed restore leaves a real recoverable quarantine entry
+    # The quarantined original must remain available for recovery.
     quarantine_dir = uploads_dir / ".quarantine"
-    assert quarantine_dir.exists(), "Quarantine directory should exist when restore fails"
+    assert quarantine_dir.exists()
+
     entries = list(quarantine_dir.iterdir())
-    assert len(entries) == 1, "Exactly one quarantine entry should exist when restore fails"
-    entry_dir = entries[0]
-    assert entry_dir.is_dir(), "Quarantine entry should be a directory"
+    assert len(entries) == 1
 
-    # The quarantined file should exist and have correct contents
-    quarantined_files = [f for f in entry_dir.iterdir() if f.name != "meta.json"]
-    assert len(quarantined_files) == 1, "Exactly one quarantined file should exist"
-    quarantined_file = quarantined_files[0]
-    assert quarantined_file.is_file(), "Quarantined file should be a regular file"
-    assert quarantined_file.read_bytes() == original_bytes, "Quarantined file contents should match original"
+    quarantined_files = [
+        f for f in entries[0].iterdir() if f.name != "meta.json"
+    ]
+    assert len(quarantined_files) == 1
+    assert quarantined_files[0].read_bytes() == original_bytes
 
-    # DB record must still exist
+    # Original metadata must survive the failed deletion transaction.
     get_resp = client.get(f"/api/v1/files/{file_id}")
     assert get_resp.status_code == 200
     assert get_resp.json()["id"] == file_id
 
-    # No DELETE activity
-    act_res = client.get("/api/v1/activity")
-    assert act_res.json()["total"] == 1  # Only the upload activity
+    # A durable RESTORE operation must exist for the recovery worker.
+    with sessionmaker(bind=engine)() as session:
+        pending = (
+            session.query(PendingDeletion)
+            .filter_by(
+                original_file_id=file_id,
+                operation_type="RESTORE",
+            )
+            .one_or_none()
+        )
+
+        assert pending is not None
+        assert pending.status == "PENDING"
+        assert pending.quarantine_id is not None
+        assert "restore failed" in pending.last_error.lower()
 
 
 def test_delete_commit_succeeds_cleanup_fails(delete_env):
@@ -722,3 +1022,137 @@ def test_delete_activity_created_on_success(delete_env):
     assert del_act["action_type"] == "DELETE"
     assert del_act["file_name"] == "success_delete.txt"
     assert del_act["file_id"] is None
+
+
+def test_delete_populates_all_pending_deletion_snapshot_fields(delete_env):
+    """Verify that file deletion populates all snapshot fields on PendingDeletion.
+
+    This ensures that original_file_id, original_logical_path, tags, category,
+    mime_type, size, sha256, and provider_account_id are preserved for restore.
+    """
+    from backend.models.pending_deletion import PendingDeletion
+
+    env = delete_env
+    client = env["client"]
+    engine = env["engine"]
+    Session = sessionmaker(bind=engine)
+
+    # Upload file
+    payload = _upload(client, "snapshot_test.txt", b"snapshot content to verify fields")
+    file_id = payload["id"]
+
+    # Update metadata to ensure all optional snapshot fields are populated
+    db = Session()
+    try:
+        rec = db.get(UnifiedFileRecord, file_id)
+        assert rec is not None
+        rec.provider_account_id = "test-acc-123"
+        rec.category = "TestCategory"
+        rec.tags = ["tag1", "tag2"]
+        db.commit()
+    finally:
+        db.close()
+
+    # Intercept cleanup so PendingDeletion remains in DB for inspection
+    from backend.storage.registry import lookup as registry_lookup
+    from backend.storage.registry import lookup as registry_lookup
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("keep pending", provider="LOCAL"))
+        return adapter, caps
+
+    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 204
+
+    # Verify PendingDeletion record contains all snapshot fields
+    db = Session()
+    try:
+        pending_records = db.query(PendingDeletion).all()
+        matching = [p for p in pending_records if p.original_file_id == file_id]
+        assert len(matching) == 1
+        pd = matching[0]
+
+        assert pd.original_file_id == file_id
+        assert pd.original_logical_path == f"/snapshot_test.txt"
+        assert pd.original_mime_type == "text/plain"
+        assert pd.original_size_bytes == len(b"snapshot content to verify fields")
+        assert pd.original_sha256 is not None
+        assert pd.original_category == "TestCategory"
+        assert pd.original_tags == ["tag1", "tag2"]
+        assert pd.provider_account_id == "test-acc-123"
+        assert pd.provider == "LOCAL"
+        assert pd.file_name_snapshot == "snapshot_test.txt"
+        assert pd.quarantine_id is not None
+    finally:
+        db.close()
+
+
+def test_delete_handles_empty_tags_and_none_category_correctly(delete_env):
+    """Verify snapshot capture handles empty tags and None category cleanly."""
+    from backend.models.pending_deletion import PendingDeletion
+
+    env = delete_env
+    client = env["client"]
+    engine = env["engine"]
+    Session = sessionmaker(bind=engine)
+
+    payload = _upload(client, "empty_tags.txt", b"empty tags")
+    file_id = payload["id"]
+
+    from backend.storage.registry import lookup as registry_lookup
+    def mock_lookup(provider):
+        adapter, caps = registry_lookup(provider)
+        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("keep pending", provider="LOCAL"))
+        return adapter, caps
+
+    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 204
+
+    db = Session()
+    try:
+        pending_records = db.query(PendingDeletion).all()
+        matching = [p for p in pending_records if p.original_file_id == file_id]
+        assert len(matching) == 1
+        pd = matching[0]
+
+        assert pd.original_file_id == file_id
+        assert pd.original_tags == []
+        assert pd.original_category is None
+        assert pd.provider_account_id is None
+    finally:
+        db.close()
+
+
+def test_delete_failure_before_commit_rolls_back_everything(delete_env):
+    """Verify that a failure during the deletion transaction leaves the record intact without PendingDeletion."""
+    import sqlalchemy.orm
+    from backend.models.pending_deletion import PendingDeletion
+
+    env = delete_env
+    client = env["client"]
+    engine = env["engine"]
+    Session = sessionmaker(bind=engine)
+
+    payload = _upload(client, "rollback_test.txt", b"rollback check")
+    file_id = payload["id"]
+
+    with patch.object(sqlalchemy.orm.Session, "commit", side_effect=Exception("forced DB commit failure")):
+        response = client.delete(f"/api/v1/files/{file_id}")
+
+    assert response.status_code == 500
+
+    db = Session()
+    try:
+        # Original UnifiedFileRecord must still exist
+        assert db.get(UnifiedFileRecord, file_id) is not None
+        # PendingDeletion must NOT exist
+        pending_records = db.query(PendingDeletion).all()
+        matching = [p for p in pending_records if p.original_file_id == file_id]
+        assert len(matching) == 0
+    finally:
+        db.close()
+

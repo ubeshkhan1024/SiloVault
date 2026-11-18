@@ -290,6 +290,36 @@ body {
     font-style: italic;
 }
 
+/* Upload provider selector */
+.upload-provider-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.upload-provider-label {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.upload-provider-select {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.4rem 0.75rem;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.upload-provider-select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
 /* Upload zone */
 .upload-zone {
     border: 2px dashed var(--border);

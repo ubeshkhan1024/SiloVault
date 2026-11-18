@@ -371,3 +371,13 @@ Milestones M0 through M3.2 are implemented and covered by 541 automated tests. T
 
 - All behavior above is verified by the automated test suite (541 passed, 3 skipped). Google Drive behavior is verified with **mocked** Drive API services and a fake keyring — no live account calls are made in tests.
 - **Not yet manually verified:** real Google Drive account integration (live OAuth connect, live upload/download/rename/move against an actual Drive account). This manual QA remains open for M3.2 sign-off.
+
+### 7.8 M3.2 Stage A — Database Foundation (Implemented)
+
+The database schema has been extended to support file restoration and recovery worker fencing.
+
+- **Snapshot Columns:** Seven nullable columns (`original_file_id`, `original_logical_path`, `original_mime_type`, `original_size_bytes`, `original_sha256`, `original_category`, `original_tags`) added to `pending_deletions` to preserve file state at the moment of deletion.
+- **Concurrency Fencing:** `operation_generation` (Integer, non-null, default 0) added to prevent "zombie workers" from executing stale operations.
+- **Status Expansion:** The `status` column length increased to 32 characters to accommodate new lifecycle states.
+- **SQLite Compatibility:** All changes implemented using Alembic batch operations to ensure safe schema modification on SQLite.
+- **Isolation:** Migration tests use temporary database files (controlled via `DATABASE_PATH`) to ensure the production database is never modified during testing.

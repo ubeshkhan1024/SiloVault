@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Index, Integer, String, UniqueConstraint, text
+from sqlalchemy import Index, Integer, JSON, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -18,11 +18,18 @@ from backend.models.unified_file import UTCDateTime
 
 
 class PendingDeletion(Base):
-    """Durable record of a storage resource awaiting permanent cleanup.
+    """
+    Durable record of a storage resource awaiting permanent cleanup.
 
-    Written atomically in the same transaction that removes the
-    ``UnifiedFileRecord``. Survives crashes between the DB commit and the
-    provider cleanup call; consumed by the recovery service.
+    Future status values (handled by later stages):
+        • PENDING
+        • PROCESSING            – legacy generic flag
+        • CLEANUP_IN_PROGRESS
+        • RESTORE_IN_PROGRESS
+        • FAILED
+        • RESTORE_RECOVERY_REQUIRED
+
+    Successful cleanup does **not** persist a SUCCESS status; the row is simply deleted.
     """
 
     __tablename__ = "pending_deletions"
@@ -49,7 +56,7 @@ class PendingDeletion(Base):
 
     # Lifecycle: PENDING -> PROCESSING -> (row deleted) | FAILED (retryable)
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="PENDING", index=True
+        String(32), nullable=False, default="PENDING", index=True
     )
 
     # Retry bookkeeping
@@ -80,6 +87,38 @@ class PendingDeletion(Base):
     )
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(
         UTCDateTime, nullable=True
+    )
+
+    # Operation type — CLEANUP or RESTORE
+    operation_type: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )
+
+    # Snapshot columns – added for Stage A
+    original_file_id: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True
+    )
+    original_logical_path: Mapped[Optional[str]] = mapped_column(
+        String(1024), nullable=True
+    )
+    original_mime_type: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True
+    )
+    original_size_bytes: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    original_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    original_category: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True
+    )
+    original_tags: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True
+    )
+    # Generation counter – added for Stage A
+    operation_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text('0')
     )
 
     __table_args__ = (

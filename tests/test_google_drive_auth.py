@@ -11,7 +11,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from google.auth.exceptions import RefreshError
 
+from backend.storage.errors import (
+    StorageAuthenticationError,
+    StorageUnavailableError,
+)
+from backend.storage.google_drive import GoogleDriveAdapter
 from backend.config import settings
 from backend.storage.credentials import (
     CredentialStorageError,
@@ -211,5 +217,57 @@ def test_load_restores_client_id_from_config(_fake_keyring):
     )
     loaded = load_google_drive_credentials()
     assert loaded is not None
-    assert loaded.client_id == ""  # config default when .env absent
+    assert loaded.client_id == (settings.google_drive_client_id or "")
     assert loaded.refresh_token == "rt"
+
+
+def test_authenticate_invalid_grant_raises_authentication_error(monkeypatch):
+    """An invalid refresh token must be classified as an authentication error."""
+
+    class FakeCredentials:
+        def __init__(self, **kwargs):
+            pass
+
+        def refresh(self, request):
+            raise RefreshError("invalid_grant: Token has been revoked")
+
+    monkeypatch.setattr(
+        "backend.storage.google_drive.Credentials",
+        FakeCredentials,
+    )
+
+    adapter = GoogleDriveAdapter.__new__(GoogleDriveAdapter)
+
+    with pytest.raises(StorageAuthenticationError):
+        adapter.authenticate({
+            "refresh_token": "fake-token",
+            "client_id": "fake-client",
+            "client_secret": "fake-secret",
+            "scopes": [],
+        })
+
+
+def test_authenticate_temporary_refresh_failure_raises_unavailable(monkeypatch):
+    """A temporary refresh failure must not be classified as invalid credentials."""
+
+    class FakeCredentials:
+        def __init__(self, **kwargs):
+            pass
+
+        def refresh(self, request):
+            raise RefreshError("temporarily_unavailable")
+
+    monkeypatch.setattr(
+        "backend.storage.google_drive.Credentials",
+        FakeCredentials,
+    )
+
+    adapter = GoogleDriveAdapter.__new__(GoogleDriveAdapter)
+
+    with pytest.raises(StorageUnavailableError):
+        adapter.authenticate({
+            "refresh_token": "fake-token",
+            "client_id": "fake-client",
+            "client_secret": "fake-secret",
+            "scopes": [],
+        })

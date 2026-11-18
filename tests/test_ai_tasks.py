@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
 # Expected head revision after the AI tasks migration is applied.
-EXPECTED_AI_HEAD = "20261114165042"
+EXPECTED_AI_HEAD = "20261117221800"
 
 # Columns the model declares on ai_tasks.
 EXPECTED_AI_COLUMNS = {
@@ -344,7 +344,7 @@ def test_file_id_foreign_key_targets_unified_file_records(temp_db):
 
 def test_downgrade_removes_only_ai_tasks(temp_db):
     """Downgrading one step drops ai_tasks and leaves all other tables intact."""
-    _run_alembic_cmd(temp_db, "upgrade", ["head"])
+    _run_alembic_cmd(temp_db, "upgrade", ["20261114165042"])
     _run_alembic_cmd(temp_db, "downgrade", ["-1"])
 
     engine = _make_engine(temp_db.parent, temp_db.name)

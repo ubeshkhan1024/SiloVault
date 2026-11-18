@@ -4,9 +4,12 @@ import asyncio
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
+from backend.storage.errors import StorageAuthenticationError
 from backend.api.v1.router import api_router
-from backend.api.v1.endpoints.google_drive import _set_adapter as _set_gdrive_adapter
+from backend.api.v1.endpoints.google_drive import (
+    _set_adapter as _set_gdrive_adapter,
+    _set_startup_auth_failure as _set_gdrive_startup_failure,
+)
 from backend.config import settings
 from backend.database import check_database_migrated, SessionLocal
 from backend.services.recovery import RecoveryService
@@ -70,11 +73,18 @@ async def lifespan(app: FastAPI):
             )
             register("GOOGLE_DRIVE", gdrive_adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
             _set_gdrive_adapter(gdrive_adapter)
+            _set_gdrive_startup_failure(None)  # clear any prior failure
             logger.info("Google Drive adapter registered from stored credentials")
         except Exception as exc:
             logger.warning(
                 "Failed to restore Google Drive connection from stored credentials: %s", exc
             )
+
+            if isinstance(exc, StorageAuthenticationError):
+                _set_gdrive_startup_failure(str(exc))
+            else:
+                _set_gdrive_startup_failure(None)
+
             # Do not register the adapter; user can reconnect via /connect
 
     # Build the recovery service before yielding so it can be accessed
