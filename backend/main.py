@@ -10,6 +10,8 @@ from backend.api.v1.endpoints.google_drive import (
     _set_adapter as _set_gdrive_adapter,
     _set_startup_auth_failure as _set_gdrive_startup_failure,
 )
+from backend.ai.bootstrap import configure_ai_model_services
+from backend.ai.lifecycle import start_ai_worker, stop_ai_worker
 from backend.config import settings
 from backend.database import check_database_migrated, SessionLocal
 from backend.services.recovery import RecoveryService
@@ -45,6 +47,10 @@ async def lifespan(app: FastAPI):
     back-off time.
     """
     check_database_migrated()
+
+    # Shared AI model services (metadata and storage only). Constructed once
+    # here; no descriptors, downloads, or directories are created at startup.
+    configure_ai_model_services(app, settings)
 
     # Register LOCAL storage adapter (always available)
     adapter = LocalAdapter(settings.uploads_dir)
@@ -105,9 +111,22 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(_recovery_poll_loop(recovery))
     app.state._recovery_worker_task = worker_task
 
+    # Optional AI task worker: reuses the shared model services, registers
+    # only executable processors and runs one recovery/processing loop.
+    # Started last so an earlier startup failure never leaves it running;
+    # missing models or a worker failure leave the API fully usable.
+    start_ai_worker(app, settings)
+
     try:
         yield
     finally:
+        # Stop claiming AI tasks and let the in-flight cycle finish before
+        # adapters and model services are released.
+        try:
+            await stop_ai_worker(app)
+        except Exception as exc:
+            logger.warning("AI worker shutdown failed: %s", exc)
+
         # Stop the background worker gracefully on shutdown.
         worker_task.cancel()
         try:
@@ -143,21 +162,14 @@ async def _recovery_poll_loop(recovery: RecoveryService) -> None:
         except Exception as exc:
             logger.warning("Background recovery loop error: %s", exc)
 
+        # Sleep on the event loop, not in an executor thread: a blocking
+        # sleep is not interruptible by cancellation, so shutdown would leave
+        # an orphaned thread that blocks event-loop teardown for the full
+        # interval.
         try:
-            await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(None, _sleep_seconds, POLL_INTERVAL_SECONDS),
-                timeout=POLL_INTERVAL_SECONDS + 1,
-            )
-        except asyncio.TimeoutError:
-            pass
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             break
-
-
-def _sleep_seconds(seconds: int) -> None:
-    """Block for *seconds* seconds in a thread pool (for use with run_in_executor)."""
-    import time
-    time.sleep(seconds)
 
 
 app = FastAPI(

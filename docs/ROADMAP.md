@@ -5,7 +5,7 @@ This document defines the proposed multi-phase development roadmap for **SiloVau
 For overall scope and terminology, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For structural design, see [ARCHITECTURE.md](ARCHITECTURE.md). For data movement, see [DATA_FLOW.md](DATA_FLOW.md). For security guidelines, see [SECURITY.md](SECURITY.md).
 
 > [!NOTE]
-> **Status:** This roadmap is a **Proposed Plan**. **Phase 0 (Foundation) is complete** — documentation, repository setup, and an application skeleton (FastAPI backend with routes, PWA frontend shell with 6 views, test scaffolding) are in place. All non-health endpoints are placeholder stubs. Subsequent milestones are scheduled for implementation beginning in December 2026.
+> **Current implementation snapshot (20 November 2026):** M0, M1, M2, M3.1, and the current M3.2 implementation checkpoint are complete. M4.0 AI architecture planning is complete. M4.1 has progressed beyond the database/API foundation: the AI task lifecycle, worker processing, proposal storage, and the backend approval/rejection workflow are implemented and tested. The end-to-end AI task/approval test has passed. The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. This roadmap retains future milestones as plans; a milestone's planned capabilities must not be mistaken for implemented functionality.
 
 ---
 
@@ -51,7 +51,7 @@ flowchart TD
   - Frontend Files, Uploads, Dashboard, and Activity views wired to the real backend (upload queue, drag-and-drop, download/delete actions, load-more pagination on the dedicated Activity page, automatic refresh of Recent Activity on the Overview after any operation).
   - **Alembic** database migrations: baseline revision `b436c12118f9` for `unified_file_records`; activity revision `4ef0d0cc89e5` creating `activity_records` with three indexes (`timestamp`, `action_type`, `provider`); existing development database stamped at baseline without data loss; explicit `alembic upgrade head` workflow (migrations are never run automatically on app startup).
   - Test suite: **93 tests passing (1 platform-specific skip on Windows)** covering database, uploads, files, downloads, deletion rollback, Alembic migrations (including the new activity table), and activity history behavior.
-* **Known limitations at M1 completion:**
+* **Historical limitations at the M1 checkpoint (some were addressed in later milestones):**
   - **Activity History rollback** (`POST /api/v1/activity/rollback/{id}`) is a **placeholder** — it returns a constant message. Reversible operations require provider adapters that do not yet exist.
   - **Cloud provider integrations (Google Drive, OneDrive, Dropbox, Box, MEGA)** are **planned but not implemented**. The only operational storage today is local disk under the configured uploads directory.
   - **AI processing (Ollama, OCR, tagging, classification)**, the **approval queue**, and **cross-provider sync** are all **planned for future milestones** and have no working implementation yet.
@@ -74,7 +74,7 @@ flowchart TD
 ---
 
 ### Milestone 2 — Unified Storage Architecture
-* **Status:** **PLANNED**
+* **Status:** **COMPLETE**
 * **Objective:** Design and implement the provider-independent storage layer that allows SiloVault to connect multiple cloud providers through a common contract.
 * **Key Capabilities:**
   - Abstract base class `StorageAdapter` defining standard methods (`authenticate`, `list_files`, `get_metadata`, `upload`, `download`, `rename`, `move`, `delete`, `check_sync_status`).
@@ -100,8 +100,9 @@ flowchart TD
 ---
 
 ### Milestone 3 — First Cloud Integration: Google Drive
-* **Status:** **PLANNED**
+* **Status:** **COMPLETE (M3.1 + current M3.2 checkpoint)**
 * **Objective:** Implement the first concrete cloud storage adapter using the Google Drive API, enabling real cloud file ingestion and management.
+* **Scope note:** The Google Drive OAuth/adapter foundation and the currently implemented file-management/recovery work are complete for this checkpoint. The roadmap bullets below are the broader target scope; mobile inbox polling/intake synchronization and full cloud-provider parity are not implied to be complete. The generic file DELETE endpoint dispatches through the registered provider adapter; it is not LOCAL-only. Provider dispatch depends on a registered adapter — if an adapter is unavailable, the endpoint returns an appropriate unavailable response (HTTP 503). Google Drive automated tests use mocks and a fake keyring; do not claim live Google Drive production verification.
 * **Key Capabilities:**
   - Concrete `GoogleDriveAdapter` implementing `StorageAdapter`.
   - OAuth 2.0 PKCE / loopback flow for developer authentication with token refresh.
@@ -127,7 +128,8 @@ flowchart TD
 ---
 
 ### Milestone 4 — Local AI Processing Pipeline
-* **Status:** **PLANNED**
+* **Status:** **IN PROGRESS (M4.0 complete; M4.1 foundation in progress)**
+* **Current checkpoint:** M4.0 architecture planning is complete. M4.1 has progressed beyond the database/API foundation: the AI task lifecycle, worker processing, proposal storage, and the backend approval/rejection workflow are implemented and tested. The end-to-end AI task/approval test has passed. The end-user OCR, image understanding, classification, semantic search, and approval-driven organization pipeline is still future work.
 * **Objective:** Connect the local Ollama AI engine and local OCR to classify files, extract metadata, generate tags, and route consequential actions through human review.
 * **Key Capabilities:**
   - Local HTTP client connecting to `http://127.0.0.1:11434` (Ollama) with configurable model (`llama3:8b`).
@@ -137,7 +139,7 @@ flowchart TD
   - Human Approval Queue (`GET /api/v1/approvals/pending`, `POST /api/v1/approvals/{approval_id}/action`).
   - Approval UI in PWA for reviewing, editing, approving, or rejecting proposed renames/moves.
 * **Dependencies & Prerequisites:** Milestone 1 (file records) and Milestone 3 (real file payloads downloaded to intake temp sandbox).
-* **Deliverables:** `backend/ai/ollama_client.py`, `backend/ai/ocr.py`, `backend/ai/pipeline.py`, populated `/ai` and `/approvals` endpoints.
+* **Deliverables:** `backend/ai/ollama_client.py`, `backend/ai/ocr.py`, `backend/ai/pipeline.py`, populated `/ai` and `/approvals` endpoints. (Note: `backend/ai/` now contains the local AI foundation — interfaces, storage, model installation, trusted catalogue, execution bridge, text extraction, processors, processor registration, and the worker lifespan integration in `lifecycle.py`. The durable AI task lifecycle, proposal storage, and backend approval/rejection workflow are implemented in `backend/services/ai_worker.py` and `backend/services/approval.py`. The M4.4 worker infrastructure — lease heartbeat, expired-lease recovery, processor registration, and lifespan integration — is implemented and tested; no production model downloader or inference runtime is wired up yet.)
 * **Relevant Areas:**
   - Backend: `backend/ai/`, `backend/api/v1/endpoints/processing.py`, `backend/api/v1/endpoints/review.py`.
   - Frontend: `frontend/js/dashboard.js`, `frontend/js/api.js` (approval actions).

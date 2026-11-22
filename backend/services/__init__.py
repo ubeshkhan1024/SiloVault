@@ -13,6 +13,8 @@ from backend.services.activity import (
     record_activity,
 )
 from backend.services.recovery import RecoveryService
+from backend.services.ai_worker import AiWorkerService
+from backend.services.approval import ApprovalService
 
 __all__: list[str] = [
     "ACTION_DELETE",
@@ -21,4 +23,6 @@ __all__: list[str] = [
     "STATUS_SUCCESS",
     "record_activity",
     "RecoveryService",
+    "AiWorkerService",
+    "ApprovalService",
 ]

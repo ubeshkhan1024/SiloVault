@@ -15,18 +15,22 @@ Design notes
 * Multiple AI tasks may reference the same file — there is deliberately **no**
   unique constraint on ``file_id``.
 * ``status`` is a closed state machine:
-  ``PENDING -> PROCESSING -> AWAITING_APPROVAL -> SUCCEEDED`` with
-  ``FAILED`` and ``CANCELLED`` as terminal branches. ``PENDING`` transitions
-  directly to ``PROCESSING`` via an atomic conditional claim (see the future
-  worker design); there is no separate QUEUED state.
+  ``PENDING -> PROCESSING -> AWAITING_APPROVAL -> {SUCCEEDED, REJECTED}``
+  with ``FAILED`` and ``CANCELLED`` as terminal branches from ``AWAITING_APPROVAL``.
+  The AI worker stops at ``AWAITING_APPROVAL``; only the human approval service
+  may transition to ``SUCCEEDED`` or ``REJECTED``.
 * Retry bookkeeping (``retries`` / ``max_retries``) is tracked separately from
   ``status`` so a task can be retried without losing its lifecycle position.
 * Claim/lease fields (``claim_token`` / ``worker_id`` /
-  ``lease_expires_at``) mirror :class:`~backend.models.pending_deletion.
-  PendingDeletion` so the AI worker can use the same ownership convention.
+  ``lease_expires_at``) mirror :class:`~backend.models.pending_deletion.PendingDeletion`
+  so the AI worker can use the same ownership convention.
 * ``proposal_json`` holds AI-generated metadata as a **proposal** only. It is
   never applied to the original file metadata in Stage 1; application of
   approved proposals is a later stage.
+* ``decision`` records the human decision: ``"APPROVE"`` or ``"REJECT"``.
+  ``None`` until an approval/rejection action is performed.
+* ``decided_at`` records the timestamp of the human decision. ``None`` until
+  an approval/rejection action is performed.
 
 This model does not implement the worker, recovery, or any AI runtime.
 """
@@ -119,6 +123,20 @@ class AiTask(Base):
         String(1024), nullable=True
     )
 
+    # Human decision record.
+    # recorded by the approval service: "APPROVE" or "REJECT".
+    # None until an approval/rejection action is performed.
+    decision: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True
+    )
+
+    # Timestamp of the human decision.
+    # Set by the approval service when a decision is recorded.
+    # None until an approval/rejection action is performed.
+    decided_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime, nullable=True
+    )
+
     __table_args__ = (
         # Pending-task selection and expired-lease recovery are the dominant
         # access patterns for the worker.
@@ -132,6 +150,8 @@ class AiTask(Base):
             f"id={self.id!r}, "
             f"file_id={self.file_id!r}, "
             f"task_type={self.task_type!r}, "
-            f"status={self.status!r}"
+            f"status={self.status!r}, "
+            f"decision={self.decision!r}, "
+            f"decided_at={self.decided_at!r}"
             f")>"
         )

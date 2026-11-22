@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
 # Expected head revision after the AI tasks migration is applied.
-EXPECTED_AI_HEAD = "20261117221800"
+EXPECTED_AI_HEAD = "20261119221300"
 
 # Columns the model declares on ai_tasks.
 EXPECTED_AI_COLUMNS = {
@@ -52,6 +52,8 @@ EXPECTED_AI_COLUMNS = {
     "lease_expires_at",
     "proposal_json",
     "error_message",
+    "decision",
+    "decided_at",
 }
 
 EXPECTED_AI_INDEXES = {
@@ -68,6 +70,7 @@ VALID_STATUSES = {
     "SUCCEEDED",
     "FAILED",
     "CANCELLED",
+    "REJECTED",
 }
 
 

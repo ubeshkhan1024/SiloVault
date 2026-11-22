@@ -16,13 +16,13 @@ To ensure clarity across all documentation, architecture elements are categorize
 
 | Status | Definition | Components |
 |---|---|---|
-| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton, PWA frontend shell, SQLite database with Alembic migrations, `UnifiedFileRecord` model, full file CRUD endpoints (upload, list, detail, download, delete, rename, move), activity history, Google Drive OAuth flow, storage adapter registry (LOCAL + GOOGLE_DRIVE), background deletion recovery service, 541 automated tests. AI pipeline, mobile uploader, approval queue, and other cloud provider integrations remain planned for future milestones. |
+| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton, PWA frontend shell, SQLite database with Alembic migrations, `UnifiedFileRecord` model, local file operations (upload, list, detail, download, quarantine-based delete), plus rename and logical-move endpoints, activity history, Google Drive OAuth flow, storage adapter registry (LOCAL + GOOGLE_DRIVE), background deletion recovery service, 722 passing automated tests in the latest full run (3 skipped). M4.0 AI architecture planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested. M4.4 AI worker infrastructure (lease heartbeat, expired-lease recovery, processor registration, lifespan integration) is implemented and tested. The full AI pipeline, mobile uploader, approval workflow (frontend), and additional cloud-provider adapters remain incomplete. |
 | **Planned** | Approved core requirement, design in progress | Unified Storage Service orchestration layer, OneDrive/Dropbox/Box Adapters, Mobile Inbox intake, AI Pipeline (Ollama), Human Review Queue, Reversible storage rules |
 | **Proposed** | Architectural choice under evaluation | Multi-provider adapters (MEGA with E2EE), Supabase for Cloud Control Plane, Cross-device metadata sync |
 | **Future Possibility** | Concept for potential future extension | Additional storage providers (AWS S3, Nextcloud), multi-device sync, local vector DB / semantic search |
 
 > [!NOTE]
-> Milestones 1 through 3.2 are complete. The SQLite database, `UnifiedFileRecord` model, Alembic-migration-managed schema, full file CRUD endpoint suite (including rename and logical move), Google Drive OAuth integration, storage adapter registry, and background deletion recovery service are implemented and covered by 541 automated tests. Real Google Drive account integration has not yet been manually verified against a live account; all Google Drive behavior is verified with mocked adapters. The remaining components — AI pipeline, mobile uploader, human approval queue, and additional cloud providers — are documented as planned or proposed in the roadmap and have not yet been implemented.
+> M1 and M2 are complete; M3.1 and the current M3.2 implementation checkpoint are complete. The SQLite database, `UnifiedFileRecord`, Alembic-managed schema, local file operations, rename and logical-move APIs, Google Drive OAuth foundation, provider registry, and background deletion-recovery foundation are implemented. The latest full test run reported 722 passed, 3 skipped, 0 failed, and 1 warning. Automated Google Drive tests use mocked services. Provider adapter capability must not be confused with API endpoint parity: the generic DELETE endpoint dispatches through the registered provider adapter — it is not LOCAL-only. Provider dispatch depends on a registered adapter — if an adapter is unavailable, the endpoint returns an appropriate unavailable response (HTTP 503). M4.0 architecture planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested. The full AI processing pipeline, mobile uploader, frontend approval workflow, and additional provider adapters remain incomplete.
 
 ---
 
@@ -314,9 +314,9 @@ See [README.md](../README.md#database-migrations-alembic) for the full developer
 
 ## 7. M3.2 Implementation (Google Drive Integration & File Management)
 
-**Status: Implemented (M0, M1, M2, M3.1, M3.2 complete; M4 NOT STARTED)**
+**Status: Implemented through the current M3.2 checkpoint; M4.0 complete and M4.1 in progress**
 
-Milestones M0 through M3.2 are implemented and covered by 541 automated tests. This section documents the completed M3.2 functionality and its verified behavior.
+The current storage and Google Drive integration work is covered by the latest full suite (722 passed, 3 skipped, 0 failed, 1 warning). M4.0 planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested; actual AI processing capabilities remain unfinished. This section documents implemented behavior and calls out remaining API limitations explicitly.
 
 ### 7.1 Google Drive OAuth and Credential Management
 
@@ -341,13 +341,14 @@ Milestones M0 through M3.2 are implemented and covered by 541 automated tests. T
 
 ### 7.4 Deletion and Recovery Workflow
 
-- **Endpoint:** `DELETE /api/v1/files/{file_id}` is currently supported for LOCAL records only (non-LOCAL providers are rejected with 400).
+- **Endpoint:** `DELETE /api/v1/files/{file_id}` dispatches through the registered provider adapter. For LOCAL records, quarantine-based deletion with recovery is performed. For GOOGLE_DRIVE, the generic endpoint dispatches through the registered Google Drive adapter and its quarantine/cleanup workflow is covered by mocked tests. Live Google Drive verification remains outstanding, and this does not establish deletion parity for other cloud providers. If an adapter is unavailable, the endpoint returns HTTP 503.
 - **Protocol:** Three-phase transaction — (1) quarantine the physical file, (2) delete the metadata record and write a durable `PendingDeletion` row in the same transaction, (3a) on commit success, run physical cleanup; (3b) on commit failure, restore the quarantined file so nothing is lost.
-- **Recovery service:** A background worker (plus a one-shot startup pass) processes `PendingDeletion` records. It uses **claim tokens and leases** (5-minute lease, renewed by a heartbeat while cleanup runs) to coordinate ownership between the API and the worker, with exponential-backoff retries (up to 5) before a record is marked `FAILED`.
+- **Recovery service:** A background worker (plus a one-shot startup pass) processes `PendingDeletion` records. It uses claim tokens and leases (5-minute lease, renewed by a heartbeat while cleanup runs) to coordinate ownership between the API and the worker, with exponential-backoff retries (up to 5) before a record is marked `FAILED`.
 - **Known limitations (do not overstate the safety guarantees):**
   - The lease/claim mechanism provides a strong ownership convention at the database level, but it is **not** a perfectly concurrency-safe guarantee in the distributed-systems sense: if a process is hard-killed (e.g., power loss) while a physical cleanup is in flight, a second worker can claim the record after the lease expires and re-run cleanup. Cleanup is written to be idempotent (an already-absent resource is treated as success), which is the practical mitigation.
   - The heartbeat thread uses a 10-second join timeout; if it has not stopped, finalization and retry scheduling are skipped and the record is left for recovery after lease expiry.
-  - Google Drive deletion (trash/quarantine via the Drive API) is not yet exposed through the `DELETE` endpoint; the recovery service itself already supports GOOGLE_DRIVE records.
+  - The generic `DELETE /api/v1/files/{file_id}` endpoint dispatches through the registered provider adapter; it is not LOCAL-only. Google Drive deletion through this endpoint is implemented and covered by mocked adapter tests, but must not be described as live-provider verified. Other cloud providers still require their own implementation and verification.
+  - A complete user-facing restore workflow is not implemented. The RESTORE recovery operation is a failure-recovery foundation, not a general restore UI/API.
 
 ### 7.5 File Rename API
 
@@ -369,8 +370,7 @@ Milestones M0 through M3.2 are implemented and covered by 541 automated tests. T
 
 ### 7.7 Verification Status
 
-- All behavior above is verified by the automated test suite (541 passed, 3 skipped). Google Drive behavior is verified with **mocked** Drive API services and a fake keyring — no live account calls are made in tests.
-- **Not yet manually verified:** real Google Drive account integration (live OAuth connect, live upload/download/rename/move against an actual Drive account). This manual QA remains open for M3.2 sign-off.
+- The latest full automated test run reported **722 passed, 3 skipped, 0 failed, 1 warning**. Google Drive automated tests use mocked Drive API services and a fake keyring. Treat manual smoke checks and mocked automated tests as different evidence; neither alone constitutes production readiness. The generic DELETE endpoint dispatches through the registered provider adapter — it is not LOCAL-only at this checkpoint, even though the Google Drive adapter and recovery abstractions contain provider-level functionality.
 
 ### 7.8 M3.2 Stage A — Database Foundation (Implemented)
 
@@ -381,3 +381,18 @@ The database schema has been extended to support file restoration and recovery w
 - **Status Expansion:** The `status` column length increased to 32 characters to accommodate new lifecycle states.
 - **SQLite Compatibility:** All changes implemented using Alembic batch operations to ensure safe schema modification on SQLite.
 - **Isolation:** Migration tests use temporary database files (controlled via `DATABASE_PATH`) to ensure the production database is never modified during testing.
+
+### 7.9 M4.4 — AI Task Lease Heartbeat and Expired-Lease Recovery (Implemented)
+
+The AI worker (`backend/services/ai_worker.py`) claims `ai_tasks` rows with a claim token and a 300-second lease. Two mechanisms protect that ownership convention:
+
+- **Heartbeat:** while a processor runs, a background thread renews the lease through the existing conditional `renew_task_lease` update, each renewal using its own database session. A renewal that returns false or raises is treated as lost ownership and stops the loop; the worker then skips finalization so it cannot overwrite a newer owner's state.
+- **Recovery:** `recover_expired_tasks(batch_size=10)` transitions `PROCESSING` tasks whose lease is missing or expired. Recovery is a single conditional UPDATE that rechecks status and lease expiry, so it is atomic and idempotent and cannot reclaim a task that a worker renewed after the initial scan. Cancellation requests win (`CANCELLED`); otherwise the task returns to `PENDING` with `retries + 1`, or becomes `FAILED` once `retries` reaches `max_retries`. Ownership fields are cleared in every case, and no proposal is applied and no file is modified.
+
+The heartbeat interval and recovery batch size are configurable.
+
+**Lifespan integration:** `backend/ai/lifecycle.py` builds one worker with `build_ai_worker` from the shared model services, registers only executable processors, and runs a single background loop. Each cycle first runs expired-lease recovery when `AI_TASK_RECOVERY_INTERVAL_SECONDS` (default 60 s) has elapsed, then processes at most one task per registered task type, so there is never a second worker or a competing recovery loop. Cycles run in the default thread executor because the worker and processors are blocking; every worker call opens and closes its own database session. `AI_WORKER_POLL_INTERVAL_SECONDS` (default 5 s) controls the idle wait, and both intervals must be positive finite numbers.
+
+Shutdown stops accepting tasks first, wakes the poll wait, and waits up to 30 seconds for the in-flight cycle to finish before cancelling the loop. The pre-existing pending-deletion poll loop waits with `asyncio.sleep`, so cancelling it releases the loop immediately instead of leaving a non-cancellable sleeping executor thread. A processor that still outlives that grace period cannot be interrupted, but its session is closed by the worker's existing `finally` blocks. Startup failures (missing model services, invalid intervals, construction errors) are recorded on `app.state.ai_worker_error` and never block the application; when no capability is executable the worker registers no processors and only performs recovery.
+
+**Processor registration:** `backend/ai/registration.py` is the composition root that connects `TextClassificationProcessor` to `AiWorkerService`. `build_task_processors` builds processors only for capabilities the current profile can execute, so a missing model or runtime leaves tasks `PENDING` instead of claiming them and marking them `FAILED`. `register_task_processors` validates the whole mapping before applying it and refuses a conflicting processor for an already-registered task type (re-registering the identical callable is a no-op). `build_ai_worker` returns a configured worker without starting it. A task type with no registered processor is reported as unsupported before any claim, so its row is never left in `PROCESSING`.

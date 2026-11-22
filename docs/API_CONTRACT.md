@@ -6,42 +6,11 @@ error handling standards, and integration protocols for **SiloVault**.
 For overall architecture, see [ARCHITECTURE.md](ARCHITECTURE.md). For data movement, see [DATA_FLOW.md](DATA_FLOW.md). For security guidelines, see [SECURITY.md](SECURITY.md).
 
 > [!IMPORTANT]
-> **Status:** All endpoints, JSON schemas, and API groups described in this document are **Proposed Specifications**. **14 API routes are registered** in the FastAPI backend under `/api/v1/`, but **only `GET /api/v1/health` is functional**; the remaining 13 endpoints return placeholder responses with no business logic. No databases or live network listeners exist yet.
+> **Implementation status (20 November 2026):** This document contains both implemented API behavior and target contracts. It is no longer accurate to describe the backend as a skeleton or all non-health endpoints as placeholders. Core local file operations, activity history, Google Drive connect/status/disconnect, rename, logical move, deletion/recovery paths, and the AI task/approval backend workflow have implementation and automated coverage. However, not every proposed API group is complete: full sync/intake, the end-user AI pipeline, approvals UI, and a complete user-facing restore workflow remain incomplete.
 >
-> ## Implementation Status (Foundation Skeleton)
+> The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. See `ARCHITECTURE.md` for provider-specific behavior and known endpoint limitations. In particular, the generic file DELETE endpoint must not be described as full Google Drive deletion support.
 >
-> ### Functional Endpoint
-> - **`GET /api/v1/health`** — Returns `{"status": "healthy", "app": "SiloVault", "version": "0.1.0-skeleton", "timestamp": "..."}`. Extra `app` field not in contract.
->
-> ### Placeholder Endpoints (13 of 14)
-> All other endpoints return `{"status": "placeholder", "message": "... not yet implemented.", ...}` with minimal fields. **These responses are temporary and do not match the target response schemas documented below.**
->
-> | Endpoint | Placeholder Response Structure |
-> |----------|--------------------------------|
-> | `GET /api/v1/system/status` | `{"status": "placeholder", "message": "...", "components": {...}}` |
-> | `GET /api/v1/files` | `{"status": "placeholder", "message": "...", "files": []}` |
-> | `GET /api/v1/files/{file_id}` | `{"status": "placeholder", "message": "...", "file_id": "..."}` |
-> | `POST /api/v1/uploads` | `{"status": "placeholder", "message": "..."}` |
-> | `GET /api/v1/uploads` | `{"status": "placeholder", "message": "...", "uploads": []}` |
-> | `GET /api/v1/sync/status` | `{"status": "placeholder", "message": "...", "sync_service": "...", "pending_files": 0, "last_sync_at": null}` |
-> | `POST /api/v1/sync/trigger` | `{"status": "placeholder", "message": "..."}` |
-> | `POST /api/v1/ai/process/{file_id}` | `{"status": "placeholder", "message": "...", "file_id": "..."}` |
-> | `GET /api/v1/ai/tasks/{task_id}` | `{"status": "placeholder", "message": "...", "task_id": "..."}` |
-> | `GET /api/v1/approvals/pending` | `{"status": "placeholder", "message": "...", "pending_approvals": []}` |
-> | `POST /api/v1/approvals/{approval_id}/action` | `{"status": "placeholder", "message": "...", "approval_id": "...", "received_action": null}` |
-> | `GET /api/v1/activity` | `{"status": "placeholder", "message": "...", "entries": []}` |
-> | `POST /api/v1/activity/rollback/{activity_id}` | `{"status": "placeholder", "message": "...", "activity_id": "..."}` |
->
-> ### Missing Implementation (Deferred to December)
-> - **Pydantic request/response schemas** — No schemas defined in `backend/schemas/`. All endpoints use raw dict returns.
-> - **Standardized error handling** — Section 5/6 error schema not implemented. No exception handlers for 400/401/404/409/422/502.
-> - **Request validation** — `POST /api/v1/approvals/{approval_id}/action` accepts any JSON body; no schema validation.
-> - **Response schema alignment** — Placeholder responses wrap data differently than target contracts (e.g., `system/status` nests fields under `components`, `files` wraps array in object).
-> - **Frontend approval body mismatch** — `frontend/js/api.js` `submitApprovalAction` sends only `{action}`; contract expects `{action, custom_filename, custom_tags}`.
-> - **Uploads, sync, AI processing, approvals, database, rollback** — No business logic implemented. All endpoints are stubs.
->
-> **⚠️ Placeholder responses are temporary and must not be treated as production API behavior.** The JSON examples in Sections 2.1–2.6 represent the **TARGET CONTRACT / FUTURE IMPLEMENTATION** to be built in Phase 1+.
-
+> **Contract rule:** Examples and schemas below that are not explicitly marked implemented remain target specifications, not guarantees about current runtime responses. Verify endpoint behavior against the implementation and tests before relying on a contract.
 ---
 
 ## 1. API Design Principles

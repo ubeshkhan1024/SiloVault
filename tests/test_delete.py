@@ -223,10 +223,17 @@ def test_delete_cloud_provider_unregistered_returns_503(delete_env):
     engine = delete_env["engine"]
 
     # Seed a GOOGLE_DRIVE record without registering any adapter.
-    _seed_gdrive_record(engine, provider_file_id="missing-provider-file")
+    record = _seed_gdrive_record(
+        engine,
+        provider_file_id="missing-provider-file",
+    )
 
-    response = client.delete("/api/v1/files/should-not-matter")
-    assert response.status_code == 404  # Record doesn't exist yet — see below
+    response = client.delete(f"/api/v1/files/{record.id}")
+    assert response.status_code == 503
+
+    # The database record must remain intact.
+    get_response = client.get(f"/api/v1/files/{record.id}")
+    assert get_response.status_code == 200
 
 
 def test_delete_google_drive_success_registers_pending_deletion(delete_env):

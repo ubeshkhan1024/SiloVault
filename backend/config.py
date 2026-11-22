@@ -33,6 +33,18 @@ class Settings(BaseSettings):
     uploads_dir: str = "uploads"
     max_upload_size_bytes: int = 100 * 1024 * 1024  # 100 MiB
 
+    # Local AI worker lifecycle (M4.4). The worker runs inside the FastAPI
+    # lifespan; both intervals are validated at startup and a failure to
+    # start the worker never blocks the application.
+    ai_worker_poll_interval_seconds: float = 5.0
+    ai_task_recovery_interval_seconds: float = 60.0
+
+    # Local model storage root. When unset, the platform default is used:
+    # %LOCALAPPDATA%\SiloVault\models on Windows and
+    # $XDG_DATA_HOME/silovault/models (or ~/.local/share/silovault/models) on
+    # Linux. Android requires an explicit app-private path here.
+    models_dir: str | None = None
+
     # Google Drive OAuth configuration (M3.1).
     # Client credentials from Google Cloud Console (Desktop app type).
     google_drive_client_id: str | None = None

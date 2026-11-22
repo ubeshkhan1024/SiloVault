@@ -6,7 +6,9 @@ AI processing pipelines, and failure handling across **SiloVault's unified multi
 For overall scope and definitions, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For system topology, see [ARCHITECTURE.md](ARCHITECTURE.md). For safety rules, see [AGENTS.md](../AGENTS.md).
 
 > [!IMPORTANT]
-> **Status:** All workflows, state machines, and retry logic described in this document are **Proposed** or **Planned** designs. **The FastAPI backend skeleton (14 routes) and PWA frontend shell (6 views) exist**, but actual upload, synchronization, database workflows, provider adapters, and AI processing are **not implemented**. No application code or sync worker scripts are currently implemented.
+> **Status (20 November 2026):** This document describes the intended end-to-end lifecycle, but several flows remain planned. Implemented foundations include local upload/download and metadata handling, provider adapter abstractions, Google Drive OAuth and adapter operations, activity history, quarantine-based deletion, and persistent deletion-recovery processing. The complete cross-provider intake/synchronization worker, mobile offline upload workflow, full AI processing pipeline, approval workflow, and general user-facing restore experience are not complete.
+>
+> The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. Treat the diagrams below as target architecture unless a subsection explicitly identifies implemented behavior. Consult `ARCHITECTURE.md` for current provider/API limitations.
 
 ---
 

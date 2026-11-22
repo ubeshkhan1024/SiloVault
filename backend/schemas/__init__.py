@@ -99,6 +99,8 @@ class AiTaskResponse(BaseModel):
     completed_at: Optional[datetime]
     proposal_json: Optional[Dict[str, Any]]
     error_message: Optional[str]
+    decision: Optional[str]
+    decided_at: Optional[datetime]
 
     model_config = ConfigDict(from_attributes=True)
 

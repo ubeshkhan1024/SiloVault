@@ -6,7 +6,7 @@ and incident response protocols for **SiloVault**.
 For overall project vision, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For system components, see [ARCHITECTURE.md](ARCHITECTURE.md). For development safety rules, see [AGENTS.md](../AGENTS.md).
 
 > [!NOTE]
-> **Status:** This document specifies **Proposed** and **Planned** security controls for future implementation. The repository currently contains documentation, rules, configuration, and an **application skeleton** (FastAPI backend with 14 registered routes, PWA frontend shell with 6 views). All non-health endpoints are placeholder stubs with no business logic.
+> **Status:** This document mixes implemented controls with planned controls; each section should be read according to its explicit status. The current repository includes a working FastAPI/SQLite backend, local file operations, provider adapter infrastructure, Google Drive OAuth/keyring integration, and deletion-recovery foundations. The full AI pipeline, mobile authentication, multi-user account isolation, and several provider integrations are not complete.
 
 ---
 
@@ -23,7 +23,7 @@ For overall project vision, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For 
 ## 2. Authentication & Account Management
 
 > [!IMPORTANT]
-> No authentication mechanisms are currently implemented in code.
+> **Implemented:** Google Drive provider authentication uses an installed-app OAuth flow with PKCE and a loopback callback. This is provider authorization, not general SiloVault user authentication. Mobile-client login, multi-user sessions, and account isolation are not implemented.
 
 * **Proposed Account Model:** User authentication for the mobile client and Cloud Control Plane will rely on modern identity providers (e.g., Supabase Auth or OAuth 2.0).
 * **Session Handling:** Mobile sessions will utilize short-lived JWT access tokens accompanied by securely stored refresh tokens.
@@ -35,10 +35,9 @@ For overall project vision, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For 
 ## 3. Secrets & Provider Credentials Management
 
 * **Zero Repository Secrets:** No credentials, API keys, service account keys, or OAuth client secrets may ever be committed to Git.
-* **Storage Mechanisms (Planned):**
-  - **Local Development / Node:** Managed via untracked `.env` files (excluded by `.gitignore`) or secure local OS credential stores (e.g., Windows Credential Manager / macOS Keychain).
-  - **Multi-Cloud OAuth Tokens:** Refresh tokens for Google Drive, Microsoft OneDrive, Dropbox, and Box must be stored securely encrypted in the local database or local keychain.
-  - **MEGA Key Management & E2EE Handling:** Unlike standard OAuth providers, MEGA relies on user-controlled client-side encryption. User master keys and derived session keys must be held strictly in local encrypted storage (OS credential store or encrypted local database). SiloVault must strictly respect MEGA's zero-knowledge model: it must never assume it can inspect cloud file contents without obtaining the decrypted content through an authorized client-side workflow. **Plaintext passwords must never be stored on disk, logged, or cached insecurely. Master keys must never be exported to files or transmitted outside the local node; only encrypted session credentials may be retained for automatic re-authentication.**
+* **Implemented for Google Drive:** The refresh token and associated provider metadata are persisted through the OS keyring (`keyring` integration); access tokens are held in memory. Client ID and client secret are supplied through local configuration.
+* **Planned for other providers:** OneDrive, Dropbox, and Box credential storage must follow an equivalent least-privilege design when those adapters are implemented.
+* **Future MEGA key management & E2EE handling:** Unlike standard OAuth providers, MEGA relies on user-controlled client-side encryption. User master keys and derived session keys must be held strictly in local encrypted storage (OS credential store or encrypted local database). SiloVault must strictly respect MEGA's zero-knowledge model: it must never assume it can inspect cloud file contents without obtaining the decrypted content through an authorized client-side workflow. **Plaintext passwords must never be stored on disk, logged, or cached insecurely. Master keys must never be exported to files or transmitted outside the local node; only encrypted session credentials may be retained for automatic re-authentication.**
 * **Frontend Credential Isolation:** Provider client secrets, access tokens, refresh tokens, and encryption keys are strictly maintained on the backend local node. **Tokens and keys are never exposed to the frontend client.**
 * **Redaction Rules:** Logging systems and AI prompt formatters must strip sensitive header keys, authorization tokens, encryption keys, and API credentials before writing logs or passing context to local models.
 
@@ -58,7 +57,7 @@ Files uploaded remotely or processed locally across any cloud provider must be t
 
 ## 5. Local AI Security & Prompt Injection Defense
 
-* **Network Binding:** Local AI engine (`Ollama`) and backend APIs (`FastAPI`) must bind exclusively to loopback (`127.0.0.1`). They must **never** be exposed directly to the public internet or external network interfaces without an approved secure proxy.
+* **Network Binding:** Keep the local backend and any future local AI engine bound to loopback (`127.0.0.1`) unless a separately reviewed, authenticated remote-access design is introduced. Do not expose Ollama or the local API directly to the public internet.
 * **Untrusted Content Handling:** Text extracted via OCR or document parsing (e.g., PDFs, invoices, images) must be treated as untrusted data, not system instructions.
 * **Prompt Injection Mitigations (Planned):**
   - Use structured input formats (e.g., JSON schemas, clear delimiter blocks) separating system prompts from user document text.
@@ -106,7 +105,7 @@ Files uploaded remotely or processed locally across any cloud provider must be t
 | **Path Traversal in File Renaming** | Attacker crafts filename containing `../` to write files to arbitrary system directories. | Strict path sanitization; restrict file writes to designated sandbox directories. | **Planned** |
 | **Compromised Mobile Device Token** | Attacker uploads malicious files to Mobile Inbox. | Limit Mobile Inbox scope; validate file magic bytes; enforce user review on local node. | **Proposed** |
 | **Compromised MEGA Master Key** | Attacker decrypts private files stored on MEGA. | Master key stored in encrypted OS keyring/database; never transmitted to frontend; no cloud sync of master keys. | **Planned** |
-| **Accidental Overwrite / Deletion of Originals** | Permanent loss of user original files. | Enforce immutable originals policy; require copy-before-delete; store operation history for rollback. | **Planned** |
+| **Accidental Overwrite / Deletion of Originals** | Permanent loss of user original files. | Implemented foundations include quarantine-based deletion, pending-deletion snapshots, claim/lease fencing, retry handling, and rollback/recovery paths. Full user-facing restore and all-provider parity remain incomplete. | **Partially implemented** |
 | **SQL Injection in Metadata Queries** | Unauthorized data reading, modification, or local database corruption. | Mandatory use of parameterized queries and ORM abstraction layers. | **Planned** |
 
 ---

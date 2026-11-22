@@ -2,7 +2,7 @@
 
 Covers POST/GET/DELETE on ``/api/v1/ai/tasks`` using an isolated
 in-memory SQLite database (``StaticPool``) and the real FastAPI app with
-``get_db`` overridden — the same fixture pattern as
+``get_db`` overridden â€” the same fixture pattern as
 ``tests/test_file_rename_move.py``.
 
 No worker, no inference, no Ollama, no model downloads: the tests only
@@ -26,6 +26,7 @@ from backend.models.unified_file import UnifiedFileRecord
 from backend.storage.capabilities import CAPABILITY_MAP
 from backend.storage.local import LocalAdapter
 from backend.storage.registry import register, remove
+from backend.services.ai_worker import AiWorkerService
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,7 @@ def ai_env(tmp_path, monkeypatch):
         yield {
             "client": TestClient(app),
             "engine": engine,
+            "Session": TestSession,
             "uploads_dir": uploads_dir,
         }
     finally:
@@ -626,6 +628,130 @@ def test_cancel_terminal_task_returns_409(ai_env):
     assert client.get(f"/api/v1/ai/tasks/{failed.id}").json()["status"] == "FAILED"
 
 
+def test_cancel_rejected_task_returns_409(ai_env):
+
+    """A REJECTED task is terminal: cancellation returns 409 and leaves the
+
+    recorded human decision untouched."""
+
+    env = ai_env
+
+    client = env["client"]
+
+    engine = env["engine"]
+
+
+
+    record = _seed_file(engine)
+
+    decided_at = datetime.now(timezone.utc)
+
+    task = _seed_task(
+
+        engine,
+
+        record.id,
+
+        status="REJECTED",
+
+        decision="REJECT",
+
+        decided_at=decided_at,
+
+        completed_at=decided_at,
+
+    )
+
+
+
+    response = client.delete(f"/api/v1/ai/tasks/{task.id}")
+
+
+
+    assert response.status_code == 409
+
+    assert "detail" in response.json()
+
+
+
+    # The task and its decision are unchanged; no cancellation marker is set.
+
+    session = sessionmaker(bind=engine)()
+
+    try:
+
+        fresh = session.get(AiTask, task.id)
+
+        assert fresh.status == "REJECTED"
+
+        assert fresh.decision == "REJECT"
+
+        assert fresh.decided_at is not None
+
+        assert fresh.completed_at is not None
+
+        assert fresh.cancellation_requested_at is None
+
+    finally:
+
+        session.close()
+
+
+
+
+
+def test_cancel_unknown_state_returns_409(ai_env):
+
+    """A task in a state with no defined cancellation behaviour is rejected
+
+    with 409 instead of returning a misleading success."""
+
+    env = ai_env
+
+    client = env["client"]
+
+    engine = env["engine"]
+
+
+
+    record = _seed_file(engine)
+
+    task = _seed_task(engine, record.id, status="QUARANTINED")
+
+
+
+    response = client.delete(f"/api/v1/ai/tasks/{task.id}")
+
+
+
+    assert response.status_code == 409
+
+    assert "QUARANTINED" in response.json()["detail"]
+
+
+
+    # Nothing was written: the state and terminal fields are unchanged.
+
+    session = sessionmaker(bind=engine)()
+
+    try:
+
+        fresh = session.get(AiTask, task.id)
+
+        assert fresh.status == "QUARANTINED"
+
+        assert fresh.completed_at is None
+
+        assert fresh.cancellation_requested_at is None
+
+    finally:
+
+        session.close()
+
+
+
+
+
 def test_cancel_task_not_found_returns_404(ai_env):
     """Cancelling an unknown task id returns 404."""
     client = ai_env["client"]
@@ -688,3 +814,331 @@ def test_cancel_race_with_worker_claim(ai_env):
         assert fresh.claim_token == "race_worker"
     finally:
         session.close()
+
+def test_cancel_awaiting_approval_task_immediately(ai_env):
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    task = _seed_task(
+        engine,
+        record.id,
+        status="AWAITING_APPROVAL",
+        claim_token="old_token",
+        worker_id="old_worker",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    response = client.delete(f"/api/v1/ai/tasks/{task.id}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "CANCELLED"
+    assert response.json()["completed_at"] is not None
+
+    session = sessionmaker(bind=engine)()
+    try:
+        fresh = session.get(AiTask, task.id)
+        assert fresh.status == "CANCELLED"
+        assert fresh.claim_token is None
+        assert fresh.worker_id is None
+        assert fresh.lease_expires_at is None
+    finally:
+        session.close()
+
+
+def test_cancel_awaiting_approval_is_idempotent(ai_env):
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    task = _seed_task(
+        engine,
+        record.id,
+        status="AWAITING_APPROVAL",
+    )
+
+    first = client.delete(f"/api/v1/ai/tasks/{task.id}")
+    assert first.status_code == 200
+    completed_at = first.json()["completed_at"]
+
+    second = client.delete(f"/api/v1/ai/tasks/{task.id}")
+    assert second.status_code == 200
+    assert second.json()["status"] == "CANCELLED"
+    assert second.json()["completed_at"] == completed_at
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/ai/tasks/{task_id}/approve
+# ---------------------------------------------------------------------------
+
+def test_approve_task_success(ai_env):
+    """Approving an AWAITING_APPROVAL task transitions to SUCCEEDED."""
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    # Seed task in AWAITING_APPROVAL state
+    task = _seed_task(
+        engine,
+        record.id,
+        status="AWAITING_APPROVAL",
+        proposal_json={"category": "document", "confidence": 0.95},
+    )
+
+    response = client.post(f"/api/v1/ai/tasks/{task.id}/approve")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "SUCCEEDED"
+    assert body["decision"] == "APPROVE"
+    assert body["decided_at"] is not None
+    assert body["completed_at"] is not None
+    assert "claim_token" not in body
+    assert "worker_id" not in body
+    assert "lease_expires_at" not in body
+    assert body["proposal_json"] == {"category": "document", "confidence": 0.95}
+    assert body["decision"] == "APPROVE"
+
+    # Verify original file metadata remains untouched
+    session = sessionmaker(bind=engine)()
+    try:
+        file_record = session.get(UnifiedFileRecord, record.id)
+        assert file_record is not None
+        assert file_record.category is None
+        assert file_record.tags == []
+        assert file_record.name == "notes.txt"
+        assert file_record.logical_path == "/notes.txt"
+        assert file_record.mime_type == "text/plain"
+        assert file_record.size_bytes == 11
+        assert file_record.provider == "LOCAL"
+        assert file_record.provider_file_id == "seed_uuid_0001"
+        assert file_record.sync_state == "LOCAL"
+    finally:
+        session.close()
+
+
+def test_approve_task_not_found_returns_404(ai_env):
+    """Approving a non-existent task returns 404."""
+    env = ai_env
+    client = env["client"]
+
+    response = client.post("/api/v1/ai/tasks/nonexistent_id/approve")
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+def test_approve_task_wrong_status_returns_409(ai_env):
+    """Approving a task not in AWAITING_APPROVAL returns 409."""
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    task = _seed_task(engine, record.id, status="PROCESSING")
+
+    response = client.post(f"/api/v1/ai/tasks/{task.id}/approve")
+    assert response.status_code == 409
+    assert "detail" in response.json()
+
+
+def test_approve_duplicate_decision_returns_409(ai_env):
+    """Approving an already-approved task returns 409."""
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    task = _seed_task(
+        engine,
+        record.id,
+        status="AWAITING_APPROVAL",
+    )
+
+    # First approval succeeds
+    first = client.post(f"/api/v1/ai/tasks/{task.id}/approve")
+    assert first.status_code == 200
+    assert first.json()["status"] == "SUCCEEDED"
+
+    # Second approval fails
+    second = client.post(f"/api/v1/ai/tasks/{task.id}/approve")
+    assert second.status_code == 409
+    assert "detail" in second.json()
+
+    # Task remains SUCCEEDED
+    detail = client.get(f"/api/v1/ai/tasks/{task.id}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "SUCCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/ai/tasks/{task_id}/reject
+# ---------------------------------------------------------------------------
+
+def test_reject_task_success(ai_env):
+    """Rejecting an AWAITING_APPROVAL task transitions to REJECTED."""
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    # Seed task in AWAITING_APPROVAL state
+    task = _seed_task(
+        engine,
+        record.id,
+        status="AWAITING_APPROVAL",
+        proposal_json={"category": "document", "confidence": 0.95},
+    )
+
+    response = client.post(f"/api/v1/ai/tasks/{task.id}/reject")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "REJECTED"
+    assert body["decision"] == "REJECT"
+    assert body["decided_at"] is not None
+    assert body["completed_at"] is not None
+    assert "claim_token" not in body
+    assert "worker_id" not in body
+    assert "lease_expires_at" not in body
+    assert body["proposal_json"] == {"category": "document", "confidence": 0.95}
+
+
+def test_reject_task_not_found_returns_404(ai_env):
+    """Rejecting a non-existent task returns 404."""
+    env = ai_env
+    client = env["client"]
+
+    response = client.post("/api/v1/ai/tasks/nonexistent_id/reject")
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+def test_reject_task_wrong_status_returns_409(ai_env):
+    """Rejecting a task not in AWAITING_APPROVAL returns 409."""
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    task = _seed_task(engine, record.id, status="PROCESSING")
+
+    response = client.post(f"/api/v1/ai/tasks/{task.id}/reject")
+    assert response.status_code == 409
+    assert "detail" in response.json()
+
+
+def test_reject_duplicate_decision_returns_409(ai_env):
+    """Rejecting an already-rejected task returns 409."""
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+
+    record = _seed_file(engine)
+    task = _seed_task(
+        engine,
+        record.id,
+        status="AWAITING_APPROVAL",
+    )
+
+    # First rejection succeeds
+    first = client.post(f"/api/v1/ai/tasks/{task.id}/reject")
+    assert first.status_code == 200
+    assert first.json()["status"] == "REJECTED"
+
+    # Second rejection fails
+    second = client.post(f"/api/v1/ai/tasks/{task.id}/reject")
+    assert second.status_code == 409
+    assert "detail" in second.json()
+
+    # Task remains REJECTED
+    detail = client.get(f"/api/v1/ai/tasks/{task.id}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "REJECTED"
+def test_end_to_end_worker_processes_and_approves(ai_env):
+    """Full E2E: API creates PENDING task  worker processes to AWAITING_APPROVAL
+    with a stored proposal  API approval transitions to SUCCEEDED.
+
+    This is the genuine end-to-end path: the worker-generated proposal is
+    approved through the real FastAPI endpoint over the SAME isolated database.
+    """
+    env = ai_env
+    client = env["client"]
+    engine = env["engine"]
+    Session = env["Session"]
+
+    # 1. Seed a file and capture its metadata before any AI work.
+    record = _seed_file(engine)
+    before = client.get(f"/api/v1/files/{record.id}").json()
+
+    # 2. Create a task through the real API  PENDING.
+    created = _create_task(client, record.id)
+    task_id = created["id"]
+    assert created["status"] == "PENDING"
+
+    # 3. Build a worker over the SAME database the API uses.
+    from backend.services.ai_worker import AiWorkerService
+    worker = AiWorkerService(lambda: Session())
+
+    # 4. Register a harmless test processor that verifies it runs while the
+    #    task is PROCESSING (proving the PROCESSING transition occurred).
+    observed_states = []
+
+    def harmless_processor(received_task_id):
+        db = Session()
+        try:
+            task = db.get(AiTask, received_task_id)
+            observed_states.append(task.status)
+        finally:
+            db.close()
+        return {"category": "document", "confidence": 0.95}
+
+    worker.register_processor("text_classification", harmless_processor)
+
+    # 5. Execute the worker.
+    processed = worker.process_one_task("worker-e2e", "text_classification")
+    assert processed is True
+    assert observed_states == ["PROCESSING"]
+
+    # 6. Task is now AWAITING_APPROVAL with the proposal stored.
+    detail = client.get(f"/api/v1/ai/tasks/{task_id}")
+    assert detail.status_code == 200
+    awaiting = detail.json()
+    assert awaiting["status"] == "AWAITING_APPROVAL"
+    assert awaiting["proposal_json"] == {"category": "document", "confidence": 0.95}
+    assert awaiting["completed_at"] is not None
+    assert awaiting["started_at"] is not None
+
+    # 7. Approve through the real API endpoint.
+    approve = client.post(f"/api/v1/ai/tasks/{task_id}/approve")
+    assert approve.status_code == 200
+    succeeded = approve.json()
+    assert succeeded["status"] == "SUCCEEDED"
+    assert succeeded["decision"] == "APPROVE"
+    assert succeeded["decided_at"] is not None
+    assert succeeded["completed_at"] is not None
+    assert succeeded["proposal_json"] == {"category": "document", "confidence": 0.95}
+
+    # 8. Internal worker fields are cleared in the DB.
+    session = Session()
+    try:
+        fresh = session.get(AiTask, task_id)
+        assert fresh is not None
+        assert fresh.status == "SUCCEEDED"
+        assert fresh.decision == "APPROVE"
+        assert fresh.decided_at is not None
+        assert fresh.completed_at is not None
+        assert fresh.claim_token is None
+        assert fresh.worker_id is None
+        assert fresh.lease_expires_at is None
+        assert fresh.proposal_json == {"category": "document", "confidence": 0.95}
+    finally:
+        session.close()
+
+    # 9. Original file metadata is unchanged.
+    after = client.get(f"/api/v1/files/{record.id}").json()
+    assert before == after
+
+
+
+

@@ -29,7 +29,7 @@ is.
 | 1 | A primary **Windows laptop** acts as the local AI processing node. | **Confirmed** |
 | 2 | A **lightweight mobile application** for uploading files remotely. | **Confirmed** (in scope) |
 | 3 | **Google Drive integration** as the initial cloud storage provider. | **Confirmed** as the initial provider |
-| 4 | **Provider Adapter Architecture** for modular, multi-cloud storage connections. | **Planned** |
+| 4 | **Provider Adapter Architecture** for modular, multi-cloud storage connections. | **Implemented** (LOCAL + Google Drive adapters; others planned) |
 | 5 | **Multi-provider cloud storage support** (Microsoft OneDrive, Dropbox, Box, MEGA). | **Planned** |
 | 6 | A dedicated **mobile-upload intake inbox** per connected provider or account. | **Confirmed** (in scope) |
 | 7 | A **cloud metadata and account management** layer decoupling file bytes from metadata. | **Confirmed** (in scope) |
@@ -91,12 +91,16 @@ possibilities, but none are planned yet.
 
 ## 7. Current status
 
-The project is at the **foundation stage**: the repository holds documentation,
-development rules (see [../AGENTS.md](../AGENTS.md)), configuration
-([../.gitignore](../.gitignore)), and an **application skeleton**:
+The project has progressed beyond its initial skeleton. The current implementation includes a FastAPI backend, PWA frontend, SQLite persistence managed by Alembic, unified file metadata, local storage, a provider adapter registry, and Google Drive integration foundations.
 
-- **FastAPI backend** with 14 registered API routes under `/api/v1/` (health, system status, files, uploads, sync, AI processing, approvals, activity). All endpoints except `GET /api/v1/health` return placeholder responses.
-- **PWA frontend shell** with 6 navigable views (Dashboard, Files, Uploads, Sync, Activity, Settings), service worker for offline caching, and ES module architecture.
-- **Test scaffolding** with 6 passing tests against placeholder endpoints.
+### Implemented foundations
+- **Local storage:** file upload, listing, detail, download, rename, logical move, quarantine-based deletion, and activity history.
+- **Unified storage:** common storage-operation contract, provider capability definitions, registry-based dispatch, and normalized storage errors.
+- **Google Drive:** installed-app OAuth with PKCE/loopback callback, OS-keyring refresh-token storage, startup restoration, dedicated SiloVault root-folder management, and adapter operations.
+- **Deletion recovery:** persistent pending-deletion records, original metadata snapshots, claim tokens, leases, retry scheduling, and recovery handling.
+- **AI foundation:** M4.0 architecture planning is complete; M4.1 database/API foundation work has started, with Stage 1B.1 completed. This does not mean the full OCR/classification/organization pipeline is operational.
 
-No business logic, database models, cloud integrations, or AI processing is implemented yet. The next steps are defined in [ROADMAP.md](ROADMAP.md).
+### Current verification snapshot
+The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. Google Drive automated tests use mocks; manual provider checks should be distinguished from full production readiness. The generic file DELETE endpoint still has provider limitations documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+See [ROADMAP.md](ROADMAP.md) for milestone status and remaining work.

@@ -2,16 +2,16 @@
 
 > A privacy-focused, AI-powered unified cloud storage management platform.
 
-**Status:** Milestone 3.2 (Google Drive Integration & File Management) complete. SQLite database with Alembic migrations, unified file metadata model, real CRUD endpoints (including `PATCH /files/{id}/rename` and `PATCH /files/{id}/move`), OAuth-based Google Drive connectivity, storage adapter registry, and background deletion recovery service are all implemented and verified.
+**Current development status (20 November 2026):** M0, M1, M2, M3.1, the current M3.2 implementation checkpoint, and M4.0 AI architecture planning are complete. M4.1 (AI database/API foundation) has progressed beyond the database/API foundation: the AI task lifecycle, worker processing, proposal storage, and the backend approval/rejection workflow are implemented and tested. The end-to-end AI task/approval test has passed. The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. This is a development verification snapshot, not a production-readiness claim.
 
 
 ## What SiloVault is
 
 SiloVault is a privacy-first, unified cloud storage platform where **AI processing happens locally** on a
 primary machine (Windows laptop), while **files and metadata live across user-connected cloud storage providers**
-(initial support: Google Drive; planned: Microsoft OneDrive, Dropbox, Box, MEGA, and others). A lightweight mobile app
-lets you upload files remotely to cloud inboxes; and a local AI pipeline classifies, tags, OCRs, extracts
-metadata from, and organizes files across connected storage accounts from one central interface.
+(currently implemented adapters: LOCAL and Google Drive; planned providers include Microsoft OneDrive,
+Dropbox, Box, and MEGA). A lightweight mobile app and a local AI pipeline are part of the longer-term
+scope. The complete mobile upload workflow and user-facing AI processing pipeline are not yet complete.
 
 The guiding idea: keep the intelligence local and private, provide a single unified pane of glass across multiple
 cloud storage providers via a modular provider-adapter architecture, keep originals safe and reversible, and
@@ -22,14 +22,16 @@ ensure AI never alters or deletes user files without explicit human approval.
 These are confirmed project decisions. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 and [docs/SECURITY.md](docs/SECURITY.md) for the full treatment.
 
-- **Unified Multi-Cloud Management.** Browse, search, organize, and manage files across multiple cloud storage
-  providers (Google Drive, OneDrive, Dropbox, Box, MEGA) through a single interface without vendor lock-in.
+- **Unified Storage Direction.** A provider-independent interface and registry are implemented for LOCAL
+  and Google Drive. OneDrive, Dropbox, Box, and MEGA integrations remain planned; adapter architecture does
+  not mean every provider is already supported by every API operation.
 - **Provider-Independent Architecture.** Storage adapters implement a common interface with explicit capability
   negotiation, keeping the core system decoupled from any specific provider.
 - **Originals are sacred.** AI must never silently delete or overwrite original files.
 - **Human approval** is required for organization changes that could be consequential (moves, renames, deletions).
 - **Reversibility.** Operations should be undoable wherever possible with audit logging and rollback support.
-- **Local AI.** AI processing (via Ollama) stays on the primary local node and is never exposed directly to the public internet.
+- **Local AI.** The intended design keeps AI processing on the primary local node. The complete AI
+  processing pipeline is still under development.
 - **Separation of concerns.** Cloud metadata, account management, and physical file storage are distinct, decoupled layers.
 - **Offline-tolerant uploads.** Remote uploading works even when the primary laptop is offline.
 - **No secrets in Git.** Credentials and OAuth tokens never live in the repository or leak to the frontend.
@@ -50,12 +52,12 @@ SiloVault/
 │   ├── config.py        # Pydantic settings
 │   ├── database.py      # SQLAlchemy engine & session
 │   ├── dependencies.py  # FastAPI dependencies
-│   ├── api/v1/          # Versioned API routes (14 endpoints)
+│   ├── api/v1/          # Versioned FastAPI endpoints
 │   ├── models/          # SQLAlchemy models
 │   ├── schemas/         # Pydantic schemas
-│   ├── services/        # Business logic (placeholder)
-│   ├── storage/         # Cloud storage adapters (placeholder)
-│   └── ai/              # Local AI integration (placeholder)
+│   ├── services/        # Application services, including deletion recovery
+│   ├── storage/         # Storage interface, registry, LOCAL and Google Drive adapters
+│   └── ai/              # AI foundation; full processing pipeline is in progress
 ├── frontend/            # PWA shell
 │   ├── index.html       # Main HTML with 6 views
 │   ├── css/style.css    # Styling
@@ -101,7 +103,8 @@ first.
 
 ## Getting started
 
-The application skeleton can be run locally:
+The backend and frontend can be run locally from the repository root. Use the project's
+Python virtual environment when installing dependencies and running commands.
 
 **Backend:**
 ```bash
@@ -119,14 +122,18 @@ npx serve frontend -l 3000
 ```
 
 **Testing:**
-```bash
-pytest tests/
-# 93 tests pass (1 skipped on Windows for platform-specific symlink check)
+```powershell
+pytest -o addopts='' -q
 ```
+
+**Latest verified test snapshot (20 November 2026):** 722 passed, 3 skipped, 0 failed in 109.97 seconds. One Starlette deprecation warning was reported. Test counts change as the project evolves; rerun the suite to obtain the current result.
 
 ## Database migrations (Alembic)
 
-SiloVault uses **Alembic** for version-controlled SQLite schema migrations. Migrations are **explicit, never automatic** — the FastAPI app does not run them on startup. This is intentional: migrations modify user data and must be reviewed before execution.
+SiloVault uses **Alembic** for version-controlled SQLite schema migrations. Review the
+migration scripts and back up any database containing data before applying a migration.
+Treat downgrade/reset operations as destructive and do not run them against a database
+containing data you need to preserve.
 
 ### Commands
 
@@ -145,11 +152,7 @@ alembic upgrade head
 # Create a new migration after changing a model
 alembic revision --autogenerate -m "describe the change"
 
-# Downgrade one step (for local testing only — never on shared data)
-alembic downgrade -1
-
-# Reset to the very first migration
-alembic downgrade base
+# Avoid downgrade/reset commands on databases containing data you need to preserve.
 ```
 
 ### Workflow for adding or changing a model
@@ -158,7 +161,8 @@ alembic downgrade base
 2. Run `alembic revision --autogenerate -m "description"` to scaffold the migration.
 3. **Review the generated script** in `alembic/versions/` — do not blindly accept autogenerate output, especially for type changes or index modifications on SQLite.
 4. Commit the migration file.
-5. Run `alembic upgrade head` on any environment that needs the update.
+5. Back up the target database, review the migration, and apply it only in an
+environment where the schema change is intended.
 
 ### Temp-database workflow (autogenerate & tests)
 
@@ -193,3 +197,21 @@ To contribute:
 ## License
 
 Not yet decided. See [docs/ROADMAP.md](docs/ROADMAP.md) open questions.
+
+
+## Current implementation boundaries
+
+The following items are **not** represented as completed features:
+
+- OneDrive, Dropbox, Box, and MEGA storage adapters.
+- Full cloud-provider parity across every generic file API (including cloud deletion).
+- A complete user-facing restore workflow. Persistent recovery and provider-restore
+  foundations exist for specific failure-recovery paths.
+- Cross-provider synchronization and the complete offline mobile upload workflow.
+- The complete local AI pipeline, including production-ready OCR, image understanding,
+  semantic search, and approval-driven organization.
+- Production deployment, packaging, and release certification.
+
+For milestone-by-milestone status and known gaps, see
+[docs/PROJECT_BLUEPRINT.md](docs/PROJECT_BLUEPRINT.md) and
+[docs/ROADMAP.md](docs/ROADMAP.md).
