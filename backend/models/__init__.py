@@ -20,5 +20,16 @@ from backend.models.activity import ActivityRecord
 from backend.models.ai_task import AiTask
 from backend.models.pending_deletion import PendingDeletion
 from backend.models.unified_file import UnifiedFileRecord
+from backend.models.storage_account import StorageAccount
+from backend.models.storage_role import StorageRole
+from backend.models.storage_account_role import StorageAccountRole
 
-__all__: list[str] = ["ActivityRecord", "AiTask", "PendingDeletion", "UnifiedFileRecord"]
+__all__: list[str] = [
+    "ActivityRecord",
+    "AiTask",
+    "PendingDeletion",
+    "UnifiedFileRecord",
+    "StorageAccount",
+    "StorageRole",
+    "StorageAccountRole",
+]

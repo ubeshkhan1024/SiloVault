@@ -11,6 +11,7 @@ and never written to disk or logs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -23,9 +24,74 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Keyring service name and account identifier
+# Keyring service name (fixed); account identifier is derived from
+# ``credentials_ref`` when supplied, otherwise ``"google-drive"``.
 _KEYRING_SERVICE = "silovault"
-_KEYRING_ACCOUNT = "google-drive"
+
+
+def _derive_keyring_account(credentials_ref: str) -> str:
+    """Derive a stable, namespaced keyring account name from ``credentials_ref``.
+
+    Uses SHA-256 hashing so that arbitrary references do not create unsafe
+    keyring names or expose raw references.  The result is a deterministic
+    64-character hexadecimal string that can be used directly as the keyring
+    *account* parameter while keeping the original reference opaque.
+
+    Parameters
+    ----------
+    credentials_ref : str
+        The opaque credential reference from ``StorageAccount.credentials_ref``.
+
+    Returns
+    -------
+    str
+        A SHA-256-derived account name suitable for the keyring ``account``
+        parameter.
+    """
+    if not isinstance(credentials_ref, str):
+        raise TypeError(
+            f"credentials_ref must be a string, got {type(credentials_ref).__name__}"
+        )
+    stripped = credentials_ref.strip()
+    if not stripped:
+        raise ValueError("credentials_ref must not be empty or whitespace-only")
+    # Deterministic hash so the same reference always maps to the same account name.
+    return hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+
+
+def _get_credentials_account_name(credentials_ref: Optional[str] = None) -> str:
+    """Return the keyring account name for the given ``credentials_ref``.
+
+    When ``credentials_ref`` is ``None``, the legacy ``"google-drive"``
+    name is returned so that existing no-argument calls continue to work
+    unchanged.  When an empty string or whitespace-only string is supplied,
+    a ``ValueError`` is raised.  When a reference is supplied, a stable
+    namespaced account name is derived via SHA-256 hashing.
+
+    Parameters
+    ----------
+    credentials_ref : Optional[str]
+        The optional credential reference from a ``StorageAccount``.
+
+    Returns
+    -------
+    str
+        The keyring account name to use for read/write operations.
+
+    Raises
+    ------
+    ValueError: If ``credentials_ref`` is an empty string or whitespace-only.
+    """
+    if credentials_ref is None:
+        return "google-drive"
+    if not isinstance(credentials_ref, str):
+        raise TypeError(
+            f"credentials_ref must be a string, got {type(credentials_ref).__name__}"
+        )
+    stripped = credentials_ref.strip()
+    if not stripped:
+        raise ValueError("credentials_ref must not be empty or whitespace-only")
+    return _derive_keyring_account(credentials_ref)
 
 
 class CredentialStorageError(Exception):
@@ -40,14 +106,20 @@ class CredentialStorageError(Exception):
 class GoogleDriveCredentials:
     """Refresh-token credentials for Google Drive.
 
-    Attributes:
-        refresh_token: OAuth 2.0 refresh token (persisted to keyring).
-        client_id: OAuth client ID (from config, not persisted).
-        client_secret: OAuth client secret (from config, not persisted).
-        scopes: Tuple of OAuth scopes granted (immutable).
-        root_folder_id: Optional Google Drive folder ID for the SiloVault root folder.
-            Empty string when not yet discovered. Persisted to keyring alongside
-            the refresh token for reuse across sessions.
+    Attributes
+    ----------
+    refresh_token: str
+        OAuth 2.0 refresh token (persisted to keyring).
+    client_id: str
+        OAuth client ID (from config, not persisted).
+    client_secret: str
+        OAuth client secret (from config, not persisted).
+    scopes: tuple[str, ...]
+        Tuple of OAuth scopes granted (immutable).
+    root_folder_id: str
+        Google Drive folder ID for the SiloVault root folder.
+        Empty string when not yet discovered. Persisted to keyring alongside
+        the refresh token for reuse across sessions.
     """
 
     refresh_token: str
@@ -79,7 +151,6 @@ class GoogleDriveCredentials:
         normalized = tuple(s.strip() for s in scopes_tuple)
         if not normalized:
             raise ValueError("scopes must not be empty")
-
         object.__setattr__(self, "scopes", normalized)
 
         # Validate refresh_token
@@ -122,10 +193,11 @@ class GoogleDriveCredentials:
         (M3.1 format) will have an empty root_folder_id.
         Missing scopes key uses configured defaults; null scopes value is rejected.
 
-        Raises:
-            TypeError: If scopes is not a list or tuple.
-            ValueError: If any scope is empty or whitespace-only.
-            KeyError: If required fields are missing.
+        Raises
+        ----------
+        TypeError: If scopes is not a list or tuple.
+        ValueError: If any scope is empty or whitespace-only.
+        KeyError: If required fields are missing.
         """
         # Handle scopes: missing key -> use defaults; present but null -> error
         if "scopes" not in data:
@@ -189,11 +261,18 @@ def _get_keyring() -> keyring.Keyring:
         ) from exc
 
 
-def store_google_drive_credentials(credentials: GoogleDriveCredentials) -> None:
+def store_google_drive_credentials(
+    credentials: GoogleDriveCredentials,
+    *,
+    credentials_ref: Optional[str] = None,
+) -> None:
     """Persist Google Drive refresh token to the OS credential store.
 
     Args:
         credentials: GoogleDriveCredentials containing the refresh token.
+        credentials_ref: Optional opaque reference from ``StorageAccount`` that
+            selects a per-account keyring entry.  When ``None`` the legacy
+            ``"google-drive"`` entry is used (backward compatible).
 
     Raises:
         CredentialStorageError: If the keyring is locked, unavailable, or write fails.
@@ -213,10 +292,11 @@ def store_google_drive_credentials(credentials: GoogleDriveCredentials) -> None:
     if not credentials.scopes:
         raise ValueError("scopes must not be empty")
 
+    account_name = _get_credentials_account_name(credentials_ref)
     kr = _get_keyring()
     data = credentials.to_dict()
     try:
-        kr.set_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT, json.dumps(data))
+        kr.set_password(_KEYRING_SERVICE, account_name, json.dumps(data))
         logger.info("Google Drive credentials stored in system keyring")
     except KeyringLocked as exc:
         raise CredentialStorageError(
@@ -225,23 +305,32 @@ def store_google_drive_credentials(credentials: GoogleDriveCredentials) -> None:
         ) from exc
     except KeyringError as exc:
         raise CredentialStorageError(
-            f"Failed to store credentials in system keyring: {exc}",
-            cause=exc,
+            f"Failed to store credentials in system keyring: {exc}", cause=exc
         ) from exc
 
 
-def load_google_drive_credentials() -> Optional[GoogleDriveCredentials]:
+def load_google_drive_credentials(
+    *,
+    credentials_ref: Optional[str] = None,
+) -> Optional[GoogleDriveCredentials]:
     """Load Google Drive refresh token from the OS credential store.
 
+    Args:
+        credentials_ref: Optional opaque reference from ``StorageAccount`` that
+            selects a per-account keyring entry.  When ``None`` the legacy
+            ``"google-drive"`` entry is used (backward compatible).
+
     Returns:
-        GoogleDriveCredentials if stored credentials exist and are valid, None otherwise.
+        GoogleDriveCredentials if stored credentials exist and are valid, None
+        otherwise.
 
     Raises:
         CredentialStorageError: If the keyring is locked or unavailable.
     """
+    account_name = _get_credentials_account_name(credentials_ref)
     kr = _get_keyring()
     try:
-        stored = kr.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+        stored = kr.get_password(_KEYRING_SERVICE, account_name)
     except KeyringLocked as exc:
         raise CredentialStorageError(
             "System credential store is locked. Unlock your keyring/keychain and retry.",
@@ -249,8 +338,7 @@ def load_google_drive_credentials() -> Optional[GoogleDriveCredentials]:
         ) from exc
     except KeyringError as exc:
         raise CredentialStorageError(
-            f"Failed to load credentials from system keyring: {exc}",
-            cause=exc,
+            f"Failed to load credentials from system keyring: {exc}", cause=exc
         ) from exc
 
     if not stored:
@@ -294,8 +382,16 @@ def load_google_drive_credentials() -> Optional[GoogleDriveCredentials]:
         return None
 
 
-def delete_google_drive_credentials() -> bool:
+def delete_google_drive_credentials(
+    *,
+    credentials_ref: Optional[str] = None,
+) -> bool:
     """Delete Google Drive credentials from the OS credential store.
+
+    Args:
+        credentials_ref: Optional opaque reference from ``StorageAccount`` that
+            selects a per-account keyring entry.  When ``None`` the legacy
+            ``"google-drive"`` entry is used (backward compatible).
 
     Returns:
         True if credentials were deleted, False if none were stored.
@@ -303,14 +399,15 @@ def delete_google_drive_credentials() -> bool:
     Raises:
         CredentialStorageError: If the keyring is locked or delete fails.
     """
+    account_name = _get_credentials_account_name(credentials_ref)
     kr = _get_keyring()
     try:
         # Check if credentials exist first
-        stored = kr.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+        stored = kr.get_password(_KEYRING_SERVICE, account_name)
         if not stored:
             return False
 
-        kr.delete_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+        kr.delete_password(_KEYRING_SERVICE, account_name)
         logger.info("Google Drive credentials deleted from system keyring")
         return True
     except KeyringLocked as exc:
@@ -320,20 +417,28 @@ def delete_google_drive_credentials() -> bool:
         ) from exc
     except KeyringError as exc:
         raise CredentialStorageError(
-            f"Failed to delete credentials from system keyring: {exc}",
-            cause=exc,
+            f"Failed to delete credentials from system keyring: {exc}", cause=exc
         ) from exc
 
 
-def has_google_drive_credentials() -> bool:
+def has_google_drive_credentials(
+    *,
+    credentials_ref: Optional[str] = None,
+) -> bool:
     """Check if Google Drive credentials are stored without loading them.
+
+    Args:
+        credentials_ref: Optional opaque reference from ``StorageAccount`` that
+            selects a per-account keyring entry.  When ``None`` the legacy
+            ``"google-drive"`` entry is used (backward compatible).
 
     Returns:
         True if credentials exist in the keyring, False otherwise.
     """
+    account_name = _get_credentials_account_name(credentials_ref)
     try:
         kr = _get_keyring()
-        stored = kr.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+        stored = kr.get_password(_KEYRING_SERVICE, account_name)
         return bool(stored)
     except (KeyringError, KeyringLocked):
         return False

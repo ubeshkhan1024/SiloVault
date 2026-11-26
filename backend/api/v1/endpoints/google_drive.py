@@ -31,7 +31,7 @@ from backend.storage.credentials import (
     store_google_drive_credentials,
 )
 from backend.storage.capabilities import CAPABILITY_MAP
-from backend.storage.errors import StorageAuthenticationError
+from backend.storage.errors import StorageAuthenticationError, StorageUnavailableError
 from backend.storage.google_drive import GoogleDriveAdapter
 from backend.storage.registry import register, remove
 
@@ -214,10 +214,26 @@ def _make_callback_handler(
     return _Handler
 
 
-def _run_oauth_flow() -> dict:
+def _run_oauth_flow(
+    *,
+    credentials_ref: str | None = None,
+    promote_to: str | None = None,
+) -> dict:
     """Run the full OAuth loopback flow synchronously.
 
-    Returns a dict with 'success' (bool) and 'error' (str|None).
+    Returns a dict with 'success' (bool), 'error' (str|None) and, on success,
+    the authenticated ``adapter``.
+
+    When *credentials_ref* is supplied (HVSA H1.4D) the credentials are stored
+    in that account's own keyring entry and the returned adapter is scoped to
+    the same entry; module-level legacy adapter state and the shared provider
+    registry are left untouched.  ``None`` (the default) preserves the legacy
+    single-account behaviour exactly.
+
+    When *promote_to* is supplied (HVSA H1.4F), *credentials_ref* is a
+    per-attempt staging entry: the token is written there, authenticated, and
+    only then promoted into the *promote_to* entry, so a failed attempt can
+    never destroy a previously working credential.
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -276,46 +292,153 @@ def _run_oauth_flow() -> dict:
     if not creds or not creds.refresh_token:
         return {"success": False, "error": "no_refresh_token"}
 
-    # Store credentials securely
+    return _establish_connection(
+        creds.refresh_token,
+        scopes,
+        credentials_ref=credentials_ref,
+        promote_to=promote_to,
+    )
+
+
+def _discard_scoped_credentials(credentials_ref: str | None) -> None:
+    """Best-effort removal of a *scoped* credential entry written by a flow.
+
+    Only the entry selected by *credentials_ref* is touched.  A ``None``
+    reference means the legacy ``"google-drive"`` entry, which is deliberately
+    left alone: it belongs to the legacy connection and may hold a valid,
+    pre-existing token.
+
+    Cleanup is best-effort (HVSA H1.4F): **any** failure - a locked keyring
+    (``CredentialStorageError``) or an unexpected backend error such as
+    ``OSError`` - is swallowed so it can never replace the original
+    authentication/provider failure.  Only the exception *type* is logged; the
+    reference and exception text are never written to logs.
+    """
+    if credentials_ref is None:
+        return
+    try:
+        delete_google_drive_credentials(credentials_ref=credentials_ref)
+    except Exception as exc:
+        logger.warning(
+            "Best-effort removal of a scoped Google Drive credential entry failed (%s)",
+            type(exc).__name__,
+        )
+
+
+def _establish_connection(
+    refresh_token: str,
+    scopes: list[str],
+    *,
+    credentials_ref: str | None = None,
+    promote_to: str | None = None,
+) -> dict:
+    """Stage, authenticate, then optionally promote OAuth credentials.
+
+    Stores the refresh token in the keyring entry selected by
+    *credentials_ref* (the legacy ``"google-drive"`` entry when ``None``) and
+    returns ``{"success": True, "error": None, "adapter": adapter}``.
+
+    HVSA H1.4F - staged credential replacement.  When *promote_to* is supplied,
+    *credentials_ref* is a per-attempt staging entry and *promote_to* is the
+    account's permanent entry.  The sequence is:
+
+    1. write the new token to the staging entry only;
+    2. authenticate against it;
+    3. on success, overwrite the permanent entry and delete the staging entry;
+    4. on any failure, delete the staging entry only.
+
+    The permanent entry is therefore never touched before an attempt has
+    authenticated successfully, so a failed reconnect (invalid credentials or a
+    provider outage) leaves the previously working credential intact.  The
+    keyring offers no atomic rename, so promotion is a second ``set_password``
+    on the permanent entry: if that write fails the old value stands (the store
+    raises without replacing it) and only the staging entry is removed.
+
+    Legacy side effects (module-level adapter and shared provider registry
+    registration) happen **only** when *credentials_ref* is ``None``, so a
+    managed-account connection can never replace the legacy connection.
+    """
     gd_creds = GoogleDriveCredentials(
-        refresh_token=creds.refresh_token,
+        refresh_token=refresh_token,
         client_id=settings.google_drive_client_id or "",
         client_secret=settings.google_drive_client_secret or "",
         scopes=scopes,
     )
 
     try:
-        store_google_drive_credentials(gd_creds)
+        store_google_drive_credentials(gd_creds, credentials_ref=credentials_ref)
     except CredentialStorageError as exc:
-        return {"success": False, "error": f"credential_storage_failed: {exc}"}
+        # Only the stable error code leaves this function; keyring/backend
+        # details stay server-side (only the exception type is logged).
+        logger.warning(
+            "Google Drive credential storage failed (%s)", type(exc).__name__
+        )
+        return {"success": False, "error": "credential_storage_failed"}
 
-    # Initialize the adapter
-    adapter = GoogleDriveAdapter()
+    # The adapter is scoped to the entry it will keep using after a successful
+    # promotion; ``authenticate()`` itself never reads the keyring.
+    final_ref = promote_to if promote_to is not None else credentials_ref
+    adapter = GoogleDriveAdapter(credentials_ref=final_ref)
     try:
         adapter.authenticate(
             {
-                "refresh_token": creds.refresh_token,
+                "refresh_token": refresh_token,
                 "client_id": settings.google_drive_client_id or "",
                 "client_secret": settings.google_drive_client_secret or "",
                 "scopes": scopes,
             }
         )
     except StorageAuthenticationError as exc:
-        # Clean up stored credentials on auth failure
+        # Clean up this attempt's staging entry only (the permanent entry, if
+        # any, was never written). The client receives the stable error code
+        # only: exception text can contain provider, credential or account
+        # details, so it is never returned (only the type is logged).
+        _discard_scoped_credentials(credentials_ref)
+        logger.warning(
+            "Google Drive authentication failed (%s)", type(exc).__name__
+        )
+        return {"success": False, "error": "authentication_failed"}
+    except StorageUnavailableError as exc:
+        # Provider unreachable / network failure during authentication: same
+        # rule - drop the staging entry, keep the permanent one. The stable
+        # ``provider_unavailable`` code is preserved; the exception detail is
+        # not, because it can carry internal account or credential information.
+        _discard_scoped_credentials(credentials_ref)
+        logger.warning(
+            "Google Drive provider unavailable during OAuth (%s)",
+            type(exc).__name__,
+        )
+        return {"success": False, "error": "provider_unavailable"}
+
+    if promote_to is not None:
         try:
-            delete_google_drive_credentials()
-        except CredentialStorageError:
-            pass
-        return {"success": False, "error": f"authentication_failed: {exc}"}
+            store_google_drive_credentials(gd_creds, credentials_ref=promote_to)
+        except CredentialStorageError as exc:
+            # Promotion failed: the previous permanent credential is untouched
+            # (the failed write does not replace it), so only the staging entry
+            # is cleaned up.
+            _discard_scoped_credentials(credentials_ref)
+            logger.warning(
+                "Failed to promote staged Google Drive credentials (%s)",
+                type(exc).__name__,
+            )
+            return {
+                "success": False,
+                "error": "credential_storage_failed",
+            }
 
-    with _lock:
-        _set_adapter(adapter)
-        # Register in the shared storage registry so business endpoints
-        # (uploads, files, recovery) can locate the provider.
-        register("GOOGLE_DRIVE", adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
-        _set_startup_auth_failure(None)  # success clears any prior failure
+        # Promotion succeeded: the staged copy is redundant.
+        _discard_scoped_credentials(credentials_ref)
 
-    return {"success": True, "error": None}
+    if credentials_ref is None:
+        with _lock:
+            _set_adapter(adapter)
+            # Register in the shared storage registry so business endpoints
+            # (uploads, files, recovery) can locate the provider.
+            register("GOOGLE_DRIVE", adapter, CAPABILITY_MAP["GOOGLE_DRIVE"])
+            _set_startup_auth_failure(None)  # success clears any prior failure
+
+    return {"success": True, "error": None, "adapter": adapter}
 
 
 @router.post("/connect")
@@ -355,10 +478,11 @@ async def connect_google_drive():
     try:
         result = await asyncio.to_thread(_run_oauth_flow)
     except Exception as exc:
-        logger.error("OAuth flow failed: %s", exc)
+        # Diagnostics stay in the log; the response carries a fixed message.
+        logger.error("OAuth flow failed (%s): %s", type(exc).__name__, exc)
         raise HTTPException(
             status_code=500,
-            detail=f"OAuth flow failed: {exc}",
+            detail="OAuth flow failed.",
         ) from exc
 
     if not result["success"]:
@@ -374,7 +498,10 @@ async def connect_google_drive():
                 "Ensure 'offline' access type is configured.",
             )
         else:
-            raise HTTPException(status_code=500, detail=f"OAuth flow failed: {error}")
+            # ``error`` is a stable code (for example ``provider_unavailable``);
+            # it is logged internally but never echoed with any detail.
+            logger.warning("OAuth flow failed (error=%s)", str(error).split(":", 1)[0])
+            raise HTTPException(status_code=500, detail="OAuth flow failed.")
 
     return {
         "status": "connected",

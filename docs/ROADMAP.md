@@ -5,7 +5,9 @@ This document defines the proposed multi-phase development roadmap for **SiloVau
 For overall scope and terminology, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For structural design, see [ARCHITECTURE.md](ARCHITECTURE.md). For data movement, see [DATA_FLOW.md](DATA_FLOW.md). For security guidelines, see [SECURITY.md](SECURITY.md).
 
 > [!NOTE]
-> **Current implementation snapshot (20 November 2026):** M0, M1, M2, M3.1, and the current M3.2 implementation checkpoint are complete. M4.0 AI architecture planning is complete. M4.1 has progressed beyond the database/API foundation: the AI task lifecycle, worker processing, proposal storage, and the backend approval/rejection workflow are implemented and tested. The end-to-end AI task/approval test has passed. The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. This roadmap retains future milestones as plans; a milestone's planned capabilities must not be mistaken for implemented functionality.
+> **Current implementation snapshot (26 November 2026):** M0, M1, M2, M3.1, and the current M3.2 implementation checkpoint are complete. The HVSA H1.5 storage-account foundation is implemented: storage-account list/detail/create/partial-update APIs, server-generated credential references, account-scoped Google Drive OAuth, per-account adapter caching with scoped invalidation, cross-account isolation tests, and a migration-owned partial unique index (Alembic head `b7c4e1a92f30`). Account-scoped file operations (download, rename, logical move, delete/quarantine/restore, recovery and upload) are implemented and resolve each record through its own storage account; account deletion and an account-management UI are not implemented. M4.0 AI architecture planning is complete. M4.1 has progressed beyond the database/API foundation: the AI task lifecycle, worker processing, proposal storage, and the backend approval/rejection workflow are implemented and tested. The end-to-end AI task/approval test has passed. The latest full automated test run (26 November 2026, excluding the preserved duplicate module `tests/test_m52_vision_runtime_new.py`) reported **1792 passed, 3 skipped, 0 failed, 1 warning**. This roadmap retains future milestones as plans; a milestone's planned capabilities must not be mistaken for implemented functionality.
+>
+> **Milestone numbering:** the AI model-runtime track uses its own `AI-M4.x` / `AI-M5.x` numbering (AI-M5.1 through AI-M5.9.x). Those identifiers are **not** the roadmap Milestone 5 below, which covers additional cloud providers. Read "M5.x" in AI documents and test module names as AI-M5.x.
 
 ---
 
@@ -83,7 +85,7 @@ flowchart TD
   - Virtual multi-provider namespace in `UnifiedStorageService`.
   - Standardized error handling and mapping (`NormalizedStorageError`, rate-limit handling).
 * **Dependencies & Prerequisites:** Milestone 1 (data models for storing provider accounts and references).
-* **Deliverables:** `backend/storage/base.py`, `backend/storage/capabilities.py`, `backend/storage/service.py`, `backend/models/provider_account.py`.
+* **Deliverables:** `backend/storage/interfaces.py`, `backend/storage/capabilities.py`, `backend/storage/registry.py`, `backend/storage/account_manager.py`, `backend/models/storage_account.py`.
 * **Relevant Areas:**
   - Backend: `backend/storage/`, `backend/models/`, `backend/schemas/`.
   - Frontend: `frontend/js/settings.js` (provider accounts view).
@@ -100,7 +102,7 @@ flowchart TD
 ---
 
 ### Milestone 3 — First Cloud Integration: Google Drive
-* **Status:** **COMPLETE (M3.1 + current M3.2 checkpoint)**
+* **Status:** **COMPLETE for M3.1 and the current M3.2 checkpoint** — OAuth, the adapter and file-management/recovery work are done; mobile-inbox intake polling and the sync worker are **not** implemented, and the Sync Status view remains a placeholder. Do not read this milestone as "cloud sync complete".
 * **Objective:** Implement the first concrete cloud storage adapter using the Google Drive API, enabling real cloud file ingestion and management.
 * **Scope note:** The Google Drive OAuth/adapter foundation and the currently implemented file-management/recovery work are complete for this checkpoint. The roadmap bullets below are the broader target scope; mobile inbox polling/intake synchronization and full cloud-provider parity are not implied to be complete. The generic file DELETE endpoint dispatches through the registered provider adapter; it is not LOCAL-only. Provider dispatch depends on a registered adapter — if an adapter is unavailable, the endpoint returns an appropriate unavailable response (HTTP 503). Google Drive automated tests use mocks and a fake keyring; do not claim live Google Drive production verification.
 * **Key Capabilities:**
@@ -114,7 +116,7 @@ flowchart TD
 * **Deliverables:** `backend/storage/google_drive.py`, OAuth credentials configuration, functional sync polling worker.
 * **Relevant Areas:**
   - Backend: `backend/storage/google_drive.py`, `backend/api/v1/endpoints/sync.py`, `backend/config.py`.
-  - Frontend: `frontend/js/sync.js`, `frontend/js/settings.js`.
+  - Frontend: `frontend/js/settings.js` (there is no `frontend/js/sync.js`; the Sync Status view is a placeholder).
   - Docs: `docs/API_CONTRACT.md`, `docs/DATA_FLOW.md`.
 * **Suggested Tests:**
   - Mock Google Drive API tests for folder listing, pagination, and download streaming.
@@ -124,6 +126,13 @@ flowchart TD
   - *Decision:* Google Drive API scopes (full drive vs restricted `drive.file` / app-folder scope).
   - *Risk:* API quota consumption during polling loops (mitigated by using `Changes.list` with page tokens).
 * **Suggested Ownership:** Developer 1 (Windows / Cloud Sync Worker).
+
+#### HVSA H1.5 — Storage Account Foundation (Implemented)
+* **Status:** **IMPLEMENTED (H1.5.4 checkpoint)**
+* **Implemented:** `GET /api/v1/storage-accounts` (optional provider filter), `GET /api/v1/storage-accounts/{account_id}`, `POST /api/v1/storage-accounts` (server-generated `storage-account:<uuid4>` reference, `201`, `409` on collision, `422` on invalid input), and `PATCH /api/v1/storage-accounts/{account_id}` (partial update, `404`/`422`, per-account cache invalidation only for a changed LOCAL `storage_root`). Account-scoped Google Drive OAuth remains available under `/api/v1/storage-accounts/{account_id}/google-drive/...`.
+* **HVSA H1.5.4 — account-scoped file operations (implemented):** `resolve_file_adapter()` routes each file record to its own `StorageAccount`; download, rename, logical move, delete/quarantine, recovery (CLEANUP and RESTORE) and upload are account-aware, and managed-account failures return `404`/`409`/`503` with generic messages and never fall back to the provider registry. `POST /api/v1/uploads` accepts an optional `account_id` (omitted = legacy provider-level upload) and persists it as the record's `provider_account_id`; deletion copies it into `PendingDeletion`. LOCAL rename/move stay metadata-only and Google Drive move stays logical-only.
+* **Data and isolation:** responses never include `credentials_ref` or secrets; all four statuses (`pending`, `connected`, `disconnected`, `error`) support CRUD; credential references are validated in `AccountManager` and backed by the migration-owned partial unique expression index `uq_storage_accounts_credentials_ref_trimmed` (ASCII whitespace trim set; Unicode whitespace remains a Python-side check); managed adapters stay in the per-account cache and never enter the provider registry.
+* **Not implemented:** account `DELETE` and account-management UI. Business file endpoints are account-aware but `GET /api/v1/files` has no `account_id` filter. Cloud uploads still lack a compensating delete when the database commit fails after a successful provider upload.
 
 ---
 
@@ -139,7 +148,9 @@ flowchart TD
   - Human Approval Queue (`GET /api/v1/approvals/pending`, `POST /api/v1/approvals/{approval_id}/action`).
   - Approval UI in PWA for reviewing, editing, approving, or rejecting proposed renames/moves.
 * **Dependencies & Prerequisites:** Milestone 1 (file records) and Milestone 3 (real file payloads downloaded to intake temp sandbox).
-* **Deliverables:** `backend/ai/ollama_client.py`, `backend/ai/ocr.py`, `backend/ai/pipeline.py`, populated `/ai` and `/approvals` endpoints. (Note: `backend/ai/` now contains the local AI foundation — interfaces, storage, model installation, trusted catalogue, execution bridge, text extraction, processors, processor registration, and the worker lifespan integration in `lifecycle.py`. The durable AI task lifecycle, proposal storage, and backend approval/rejection workflow are implemented in `backend/services/ai_worker.py` and `backend/services/approval.py`. The M4.4 worker infrastructure — lease heartbeat, expired-lease recovery, processor registration, and lifespan integration — is implemented and tested; no production model downloader or inference runtime is wired up yet.)
+* **Original planned deliverables:** `backend/ai/ollama_client.py`, `backend/ai/ocr.py`, `backend/ai/pipeline.py`, populated `/ai` and `/approvals` endpoints. **None of those three module paths exists in the repository** — they were superseded by the actual layout described next; keep them only as historical intent.
+* **Actual implemented layout:** `backend/ai/` contains interfaces, storage, model installation, trusted catalogue, execution bridge, text extraction, processors, processor registration, the Florence-2 vision runtime, an OCR runtime/adapter pair, `pack_manager.py`, and the worker lifespan integration in `lifecycle.py`. The durable AI task lifecycle, proposal storage and backend approval/rejection workflow live in `backend/services/ai_worker.py` and `backend/services/approval.py`, with routes in `backend/api/v1/endpoints/ai_tasks.py`. The M4.4 worker infrastructure — lease heartbeat, expired-lease recovery, processor registration and lifespan integration — is implemented and tested.
+* **What is still missing:** no Ollama client exists, so no local LLM inference path exists. The Florence-2 runtime needs optional packages and model weights, OCR is not wired into task processing, and `PackManager` is a read-only foundation. No AI capability is end-to-end functional, and no model downloader or pack installation service is implemented.
 * **Relevant Areas:**
   - Backend: `backend/ai/`, `backend/api/v1/endpoints/processing.py`, `backend/api/v1/endpoints/review.py`.
   - Frontend: `frontend/js/dashboard.js`, `frontend/js/api.js` (approval actions).

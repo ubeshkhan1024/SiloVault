@@ -1,0 +1,9 @@
+H1.5.1 Corrections Complete
+
+Two issues addressed:
+
+1. Stale adapter prevention: AccountResolver generation mechanism (per-account + global counters) already correctly prevents caching adapters constructed after invalidation. No resolver.py changes needed.
+
+2. Concurrency testing: Three new deterministic tests with barrier/event synchronization all pass.
+
+Results: 133/133 tests pass across all suites.

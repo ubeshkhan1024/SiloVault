@@ -13,6 +13,7 @@ from backend.api.v1.endpoints import (
     health,
     processing,
     review,
+    storage_accounts,
     sync,
     uploads,
 )
@@ -28,3 +29,4 @@ api_router.include_router(review.router)
 api_router.include_router(activity.router)
 api_router.include_router(ai_tasks.router)
 api_router.include_router(google_drive.router)
+api_router.include_router(storage_accounts.router)

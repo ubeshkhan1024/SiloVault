@@ -1,5 +1,9 @@
 ## SiloVault Repair Summary
 
+> **HISTORICAL RECORD — repair worklist from an earlier session, preserved as written.** This file states changes that were *required at the time*; it is not a description of the current tree. The repairs were subsequently applied, so read the "Changes required" wording as past intent rather than outstanding work.
+>
+> Current state (26 November 2026): `tests/test_recovery.py` contains 35 tests (the 32 cited below is historical), `tests/test_recovery_backup.py` still exists on disk, and the `PendingDeletion`/`restore()` details described here are already in the code. No claim in this file was verified by a test run during the documentation pass.
+
 ### Task: Repair 5B - Verify Google Drive Parent Preservation
 
 **File**: `backend/storage/google_drive.py`

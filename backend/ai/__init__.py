@@ -20,6 +20,7 @@ never be exposed directly to the public internet.
 from __future__ import annotations
 
 from backend.ai.interfaces import *  # noqa: F401,F403
+from backend.ai.pack_manager import PackManager, PackMetadata, PackCapability, PackManifest, PackApproval
 from backend.ai.bootstrap import (
     AiModelServices,
     AiModelServicesUnavailableError,

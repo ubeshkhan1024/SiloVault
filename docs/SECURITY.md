@@ -102,11 +102,11 @@ Files uploaded remotely or processed locally across any cloud provider must be t
 | **Exposing Local AI Endpoint to Internet** | Remote attackers execute unauthorized inference or access local host services. | Enforce strictly local loopback binding (`127.0.0.1`). No public tunnels or port forwards. | **Planned** |
 | **Leaked OAuth Credentials in Git** | Attackers gain unauthorized access to cloud storage account. | Enforce `.gitignore` rules; use automated secret scanning tools before pushing code. | **Planned** |
 | **Indirect Prompt Injection via Document OCR** | Malicious document text instructs AI to output unauthorized actions or renames. | Isolate system instructions from document context; mandate human approval for file operations. | **Planned** |
-| **Path Traversal in File Renaming** | Attacker crafts filename containing `../` to write files to arbitrary system directories. | Strict path sanitization; restrict file writes to designated sandbox directories. | **Planned** |
+| **Path Traversal in File Renaming** | Attacker crafts filename containing `../` to write files to arbitrary system directories. | Strict path sanitization; restrict file writes to designated sandbox directories. | **Implemented** (path sanitization and traversal tests exist) |
 | **Compromised Mobile Device Token** | Attacker uploads malicious files to Mobile Inbox. | Limit Mobile Inbox scope; validate file magic bytes; enforce user review on local node. | **Proposed** |
 | **Compromised MEGA Master Key** | Attacker decrypts private files stored on MEGA. | Master key stored in encrypted OS keyring/database; never transmitted to frontend; no cloud sync of master keys. | **Planned** |
 | **Accidental Overwrite / Deletion of Originals** | Permanent loss of user original files. | Implemented foundations include quarantine-based deletion, pending-deletion snapshots, claim/lease fencing, retry handling, and rollback/recovery paths. Full user-facing restore and all-provider parity remain incomplete. | **Partially implemented** |
-| **SQL Injection in Metadata Queries** | Unauthorized data reading, modification, or local database corruption. | Mandatory use of parameterized queries and ORM abstraction layers. | **Planned** |
+| **SQL Injection in Metadata Queries** | Unauthorized data reading, modification, or local database corruption. | Mandatory use of parameterized queries and ORM abstraction layers. | **Implemented** (SQLAlchemy ORM and bound parameters throughout) |
 
 ---
 

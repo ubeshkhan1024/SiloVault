@@ -166,12 +166,17 @@ def _upload(client, filename: str, content: bytes) -> dict:
 
 
 def _seed_gdrive_record(engine, provider_file_id: str, name: str) -> UnifiedFileRecord:
-    """Insert a GOOGLE_DRIVE UnifiedFileRecord directly into the database."""
+    """Insert a legacy GOOGLE_DRIVE UnifiedFileRecord into the database.
+
+    ``provider_account_id`` is NULL because these tests exercise provider-level
+    (registry) routing. Account-scoped rename/move is covered by
+    ``tests/test_file_account_rename_move.py``.
+    """
     session = sessionmaker(bind=engine)()
     try:
         record = UnifiedFileRecord(
             provider="GOOGLE_DRIVE",
-            provider_account_id="acc_1",
+            provider_account_id=None,
             provider_file_id=provider_file_id,
             name=name,
             logical_path=f"/{name}",

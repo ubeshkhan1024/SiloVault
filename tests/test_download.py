@@ -172,14 +172,18 @@ def test_download_missing_physical_file_returns_404(download_env):
 
 
 def test_download_non_local_provider_unregistered_returns_503(download_env):
-    """Download of a GOOGLE_DRIVE record fails with 503 when the provider is
-    not registered, since the endpoint dispatches to the provider adapter
-    via ``lookup(record.provider)`` rather than hard‑coding ``LOCAL``.
+    """Download of a legacy GOOGLE_DRIVE record fails with 503 when the
+    provider is not registered, since the endpoint dispatches to the provider
+    adapter via ``lookup(record.provider)`` rather than hard‑coding ``LOCAL``.
 
-    The test inserts a ``GOOGLE_DRIVE`` record into the in-memory database
-    but does **not** register a ``GOOGLE_DRIVE`` adapter.  The endpoint
-    calls ``lookup(record.provider)`` which raises
+    The test inserts a ``GOOGLE_DRIVE`` record with a NULL
+    ``provider_account_id`` (legacy/provider-level routing) into the in-memory
+    database but does **not** register a ``GOOGLE_DRIVE`` adapter.  The
+    endpoint calls ``lookup(record.provider)`` which raises
     ``StorageUnavailableError`` — mapped to HTTP 503.
+
+    A record with a non-NULL ``provider_account_id`` is account-scoped and is
+    covered separately (unknown account -> 404; no registry fallback).
     """
     env = download_env
     client = env["client"]
@@ -189,7 +193,7 @@ def test_download_non_local_provider_unregistered_returns_503(download_env):
     try:
         record = UnifiedFileRecord(
             provider="GOOGLE_DRIVE",
-            provider_account_id="acc_1",
+            provider_account_id=None,
             provider_file_id="gdrive_123",
             name="cloud.pdf",
             logical_path="/cloud.pdf",

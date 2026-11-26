@@ -1,5 +1,9 @@
 ## SiloVault Repair 2 - Complete
 
+> **HISTORICAL RECORD — preserved as written.** The "32 passed" result is a historical milestone result, not a current count.
+>
+> **Superseded detail (26 November 2026):** the test this file introduces, `test_atomic_claim_guarantees_single_session`, **no longer exists** in `tests/test_recovery.py`. That file now has 35 tests, and the conditional-update claim coverage lives in `test_conditional_update_allows_only_one_claim`. Read the section below as the record of a change that was later replaced, not as a description of the present file.
+
 ### Changes Made to `tests/test_recovery.py`
 
 **1. Replaced `test_two_sessions_compete_exactly_one_claim` with `test_atomic_claim_guarantees_single_session`**

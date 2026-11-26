@@ -17,7 +17,7 @@ from sqlalchemy import select, or_, and_
 from sqlalchemy.orm import Session
 
 from backend.models.pending_deletion import PendingDeletion
-from backend.storage.registry import lookup
+from backend.storage.file_account_resolution import resolve_file_adapter
 from backend.storage.errors import (
     StorageNotFoundError,
     StorageAuthenticationError,
@@ -173,7 +173,10 @@ class RecoveryService:
 
         Dispatches to _execute_cleanup or _execute_restore based on
         record.operation_type.  Unknown or missing operation types are
-        rejected before any provider lookup.
+        rejected before any adapter lookup.  The adapter is resolved by
+        ``resolve_file_adapter``: legacy records (NULL provider_account_id)
+        use the provider registry, managed records use exactly their own
+        storage account, and a managed failure never falls back.
 
         Returns True if the record was successfully finalized (deleted from
         the queue); False if the record remains pending/failed and may be
@@ -192,21 +195,29 @@ class RecoveryService:
             )
             return False
 
-        # 2. Resolve provider adapter.
+        # 2. Resolve the adapter for this record's exact owner.  Legacy records
+        #    (NULL provider_account_id) use the provider registry; managed
+        #    records use exactly their own storage account.  Any resolution
+        #    failure - unknown account, provider mismatch, disconnected
+        #    account, or unavailable store - schedules a retry and leaves the
+        #    PendingDeletion row (and its ownership) intact.  A failed
+        #    resolution is therefore never mistaken for a missing file.
         provider = record.provider
         try:
-            adapter, _ = lookup(provider)
+            adapter = resolve_file_adapter(db, record)
         except Exception as exc:
             logger.warning(
-                "RecoveryService: storage provider %s unavailable for pending "
-                "deletion %s: %s",
-                provider,
+                "RecoveryService: could not resolve %s adapter for pending "
+                "deletion %s (provider=%s, account=%s): %s",
+                record.operation_type,
                 record.id,
+                provider,
+                record.provider_account_id,
                 exc,
             )
             self._schedule_retry(
                 db, record, claim_token, claim_generation,
-                f"Storage provider unavailable: {exc}",
+                f"Storage adapter unavailable: {exc}",
                 transient=True,
             )
             return False
@@ -227,6 +238,10 @@ class RecoveryService:
         Returns True if cleanup succeeded and the pending deletion was
         finalized; False if a retry was scheduled or a permanent failure
         occurred.
+
+        ``StorageNotFoundError`` is treated as successful cleanup only here,
+        after ``_process_single_record`` resolved the record's exact adapter,
+        so a missing resource in the right account stays idempotent.
         """
         quarantine_id = record.quarantine_id
         try:
@@ -289,7 +304,11 @@ class RecoveryService:
 
 
     def _execute_restore(self, db: Session, record: PendingDeletion, claim_token: str, claim_generation: int, adapter) -> bool:
-        """Restore a quarantined resource, handling an already-completed LOCAL restore."""
+        """Restore a quarantined resource, handling an already-completed LOCAL restore.
+
+        ``adapter`` is the record's exact account adapter, so the restore
+        target (LOCAL root or cloud account) matches the original owner.
+        """
         quarantine_id = record.quarantine_id
 
         try:

@@ -2,7 +2,7 @@
 
 > A privacy-focused, AI-powered unified cloud storage management platform.
 
-**Current development status (20 November 2026):** M0, M1, M2, M3.1, the current M3.2 implementation checkpoint, and M4.0 AI architecture planning are complete. M4.1 (AI database/API foundation) has progressed beyond the database/API foundation: the AI task lifecycle, worker processing, proposal storage, and the backend approval/rejection workflow are implemented and tested. The end-to-end AI task/approval test has passed. The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. This is a development verification snapshot, not a production-readiness claim.
+**Current development status (26 November 2026):** M0, M1, M2, M3.1 and the M3.2 implementation checkpoint are complete, and the HVSA H1.5 storage-account foundation — including H1.5.4 account-scoped file operations — is implemented. M4.0 AI architecture planning is complete; M4.1 (AI database/API foundation) and M4.4 (AI worker lease heartbeat, expired-lease recovery, processor registration, lifespan integration) are implemented and tested. The AI model-runtime track (AI-M5.x, which uses its own numbering — see [docs/ROADMAP.md](docs/ROADMAP.md)) has a Florence-2 vision runtime foundation and an OCR adapter foundation. Neither produces AI task output in a default installation: they require optional packages and model weights, and OCR is not wired into task processing at all. The latest full automated test run reported **1792 passed, 3 skipped, 0 failed, 1 warning**, with the preserved duplicate module `tests/test_m52_vision_runtime_new.py` excluded. This is a development verification snapshot, not a production-readiness claim, and no cloud provider has been verified live.
 
 
 ## What SiloVault is
@@ -123,10 +123,12 @@ npx serve frontend -l 3000
 
 **Testing:**
 ```powershell
-pytest -o addopts='' -q
+pytest -o addopts='' -q --ignore=tests/test_m52_vision_runtime_new.py
 ```
 
-**Latest verified test snapshot (20 November 2026):** 722 passed, 3 skipped, 0 failed in 109.97 seconds. One Starlette deprecation warning was reported. Test counts change as the project evolves; rerun the suite to obtain the current result.
+`tests/test_m52_vision_runtime_new.py` is a preserved duplicate of `tests/test_m53_florence2_inference.py`; it is kept on disk but excluded from the run, and `test_m53_florence2_inference.py` is the canonical module.
+
+**Latest verified test snapshot (26 November 2026):** 1792 passed, 3 skipped, 0 failed, 1 warning in 157.86 seconds with that module excluded. The warning is the Starlette deprecation for `HTTP_422_UNPROCESSABLE_ENTITY` (replacement: `HTTP_422_UNPROCESSABLE_CONTENT`). Test counts change as the project evolves; rerun the suite to obtain the current result.
 
 ## Database migrations (Alembic)
 
@@ -207,9 +209,13 @@ The following items are **not** represented as completed features:
 - Full cloud-provider parity across every generic file API (including cloud deletion).
 - A complete user-facing restore workflow. Persistent recovery and provider-restore
   foundations exist for specific failure-recovery paths.
-- Cross-provider synchronization and the complete offline mobile upload workflow.
+- Cross-provider synchronization and the complete offline mobile upload workflow. The M3 sync/intake area still contains placeholder and partial paths and must not be described as complete.
 - The complete local AI pipeline, including production-ready OCR, image understanding,
-  semantic search, and approval-driven organization.
+  semantic search, and approval-driven organization. The Florence-2 vision runtime needs
+  optional packages plus model weights, and the OCR foundation is not wired into task processing.
+- Secure AI pack downloading, checksum-verified installation and a pack-management UI. `PackManager`
+  is a read-only foundation (discovery, recommendation, in-memory approvals) only.
+- Account deletion and an account-management UI, and an `account_id` filter on `GET /api/v1/files`.
 - Production deployment, packaging, and release certification.
 
 For milestone-by-milestone status and known gaps, see

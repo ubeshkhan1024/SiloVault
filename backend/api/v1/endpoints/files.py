@@ -21,6 +21,10 @@ from backend.config import settings
 from backend.database import get_db
 from backend.models.pending_deletion import PendingDeletion
 from backend.models.unified_file import UnifiedFileRecord
+from backend.api.v1.endpoints.account_adapter_http import (
+    STORAGE_UNAVAILABLE_DETAIL,
+    resolve_adapter_or_http,
+)
 from backend.schemas import FileListResponse, FileMetadata, MoveRequest, RenameRequest
 from backend.services.activity import (
     ACTION_DELETE,
@@ -30,7 +34,6 @@ from backend.services.activity import (
     record_activity,
 )
 from backend.services.recovery import LEASE_DURATION_SECONDS, MAX_RETRIES
-from backend.storage.registry import lookup
 from backend.storage.errors import (
     StorageAuthenticationError,
     StorageError,
@@ -119,8 +122,12 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
     """Download a file by its internal record ID.
 
     Security guarantees:
-    - The adapter for ``record.provider`` is used exclusively; the client-
-      supplied ``file_id`` resolves only a database row.
+    - The client-supplied ``file_id`` resolves only a database row. The adapter
+      is resolved by :func:`resolve_file_adapter`: a legacy record
+      (``provider_account_id`` is NULL) uses the provider registry, while a
+      managed record uses exactly its own storage account. A managed-account
+      failure never falls back to the legacy registry.
+    - The adapter for the record's provider/account is used exclusively.
     - For LOCAL records the on-disk path is derived from
       ``record.provider_file_id`` (a server-generated UUID); the original
       client-supplied ``name`` is used only as the Content-Disposition header.
@@ -136,14 +143,10 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
             detail=f"File with id '{file_id}' was not found.",
         )
 
-    # Resolve the adapter for the record's provider and download from it.
-    try:
-        adapter, _ = lookup(record.provider)
-    except StorageUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Storage provider unavailable: {exc}",
-        ) from exc
+    # Resolve the adapter for the record and download from it. Legacy records
+    # use the provider registry; managed records use their own account and
+    # never fall back to the registry on failure.
+    adapter = resolve_adapter_or_http(db, record)
 
     try:
         file_bytes = adapter.download(record.provider_file_id)
@@ -154,7 +157,11 @@ async def download_file(file_id: str, db: Session = Depends(get_db)):
     except StoragePermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except StorageUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Fixed public message: the exception detail can contain internal
+        # account IDs, credential references and provider diagnostics.
+        raise HTTPException(
+            status_code=503, detail=STORAGE_UNAVAILABLE_DETAIL
+        ) from exc
     except StorageError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -197,8 +204,12 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     """Delete a file and its metadata record through the appropriate provider.
 
     Security guarantees:
-    - The adapter for ``record.provider`` is resolved and used exclusively;
-      the client-supplied ``file_id`` resolves only a database row.
+    - The client-supplied ``file_id`` resolves only a database row. The
+      adapter is resolved by :func:`resolve_file_adapter`: a legacy record
+      (``provider_account_id`` is NULL) uses the provider registry, while a
+      managed record uses exactly its own storage account. A managed-account
+      failure never falls back to the registry, and the same resolved adapter
+      performs quarantine, rollback restoration, and cleanup.
     - For LOCAL records the physical path is derived exclusively from
       ``record.provider_file_id`` (a server-generated UUID filename).
     - For LOCAL records the resolved path must be strictly inside the configured
@@ -213,14 +224,19 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     - Quarantine files have no DB record and are therefore invisible through
       normal API endpoints.
     - Pending deletion records survive application crashes and are processed
-      by the recovery service on startup or by background workers.
+      by the recovery service on startup or by background workers. They carry
+      the file's exact ``provider_account_id`` (NULL for legacy records) so
+      recovery can resolve the same account.
     - An unregistered or unavailable adapter returns HTTP 503; the record
       is not deleted.
 
     Returns:
     - 204 No Content on success.
-    - 404 if the record does not exist or the physical file is missing.
-    - 503 if the storage provider is unavailable or not registered.
+    - 404 if the record does not exist, the physical file is missing, or the
+      file's managed storage account no longer exists.
+    - 409 if the file's storage account belongs to a different provider.
+    - 503 if the storage account is disconnected or the provider is
+      unavailable or not registered.
     """
     record = db.get(UnifiedFileRecord, file_id)
     if record is None:
@@ -229,19 +245,10 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
             detail=f"File with id '{file_id}' was not found.",
         )
 
-    # Resolve the appropriate storage adapter for the record's provider.
-    try:
-        adapter, _ = lookup(record.provider)
-    except StorageUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Storage provider unavailable: {exc}",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to resolve storage provider: {exc}",
-        ) from exc
+    # Resolve the adapter for this record (legacy registry, or the record's
+    # exact managed account). Managed failures never fall back, and this same
+    # instance performs quarantine, rollback restoration, and cleanup.
+    adapter = resolve_adapter_or_http(db, record)
 
     # Snapshot metadata BEFORE the DB record is removed. The
     # delete activity and recovery/restore pipeline must remain identifiable
@@ -266,7 +273,11 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     except StoragePermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except StorageUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Fixed public message: the exception detail can contain internal
+        # account IDs, credential references and provider diagnostics.
+        raise HTTPException(
+            status_code=503, detail=STORAGE_UNAVAILABLE_DETAIL
+        ) from exc
     except StorageError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -278,7 +289,15 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     # cannot safely claim this record until the lease expires.
     claim_token = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
+    # Assign the primary key up front and keep it as an immutable scalar.
+    # ``db.commit()`` expires this ORM instance, and the heartbeat thread below
+    # must never read attributes from it: a cross-thread refresh would use this
+    # request's session and can raise ``ObjectDeletedError``. Every later use
+    # (heartbeat predicate, finalize/retry statements and logging) uses this
+    # scalar, so no attribute access happens after the commit.
+    pending_id = f"del_{uuid.uuid4()}"
     pending = PendingDeletion(
+        id=pending_id,
         provider=deleted_provider,
         provider_account_id=provider_account_id,
         provider_file_id=provider_file_id,
@@ -403,7 +422,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
                         stmt = (
                             update(PendingDeletion)
                             .where(
-                                PendingDeletion.id == pending.id,
+                                PendingDeletion.id == pending_id,
                                 PendingDeletion.status == "PROCESSING",
                                 PendingDeletion.claim_token == claim_token,
                                 PendingDeletion.lease_expires_at > now,
@@ -456,7 +475,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
                 logger.warning(
                     "delete_file: heartbeat thread did not stop within timeout; "
                     "skipping finalization and retry scheduling; id=%s",
-                    pending.id,
+                    pending_id,
                 )
         # The heartbeat thread has stopped, so its result (if any) is now final.
         heartbeat_error = None
@@ -474,7 +493,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
             # for the recovery worker; never finalize or retry without ownership.
             logger.warning(
                 "delete_file: heartbeat reported an ownership error for pending deletion %s: %s",
-                pending.id,
+                pending_id,
                 heartbeat_error,
             )
         elif cleanup_ok:
@@ -484,7 +503,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
 
             finalize_now = datetime.now(timezone.utc)
             finalize_stmt = delete(PendingDeletion).where(
-                PendingDeletion.id == pending.id,
+                PendingDeletion.id == pending_id,
                 PendingDeletion.status == "PROCESSING",
                 PendingDeletion.claim_token == claim_token,
                 PendingDeletion.lease_expires_at > finalize_now,
@@ -497,26 +516,26 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
                     db.rollback()
                     logger.warning(
                         "delete_file: could not finalize pending deletion %s because ownership was lost",
-                        pending.id,
+                        pending_id,
                     )
             except Exception:
                 db.rollback()
                 logger.exception(
                     "delete_file: failed to finalize pending deletion %s; recovery will retry after lease expiry",
-                    pending.id,
+                    pending_id,
                 )
         elif cleanup_error is not None:
             # Mirror RecoveryService._schedule_retry, including its five
             # ownership checks and exponential backoff policy.
             try:
                 db.expire_all()
-                current_pending = db.get(PendingDeletion, pending.id)
+                current_pending = db.get(PendingDeletion, pending_id)
 
                 if current_pending is None or current_pending.claim_token != claim_token:
                     logger.warning(
                         "delete_file: lost claim ownership for pending deletion %s; "
                         "cleanup failure left for recovery",
-                        pending.id,
+                        pending_id,
                     )
                 else:
                     expected_retry_count = current_pending.retry_count
@@ -527,7 +546,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
                     retry_stmt = (
                         update(PendingDeletion)
                         .where(
-                            PendingDeletion.id == pending.id,
+                            PendingDeletion.id == pending_id,
                             PendingDeletion.status == "PROCESSING",
                             PendingDeletion.claim_token == claim_token,
                             PendingDeletion.lease_expires_at > retry_now,
@@ -556,20 +575,20 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
                         logger.warning(
                             "delete_file: could not schedule retry for pending deletion %s "
                             "because ownership or retry state changed",
-                            pending.id,
+                            pending_id,
                         )
             except Exception:
                 db.rollback()
                 logger.exception(
                     "delete_file: failed to schedule cleanup retry for pending deletion %s; "
                     "recovery will retry after lease expiry",
-                    pending.id,
+                    pending_id,
                 )
         else:
             logger.warning(
                 "delete_file: cleanup did not complete for pending deletion %s, "
                 "but no cleanup exception was recorded",
-                pending.id,
+                pending_id,
             )
     except Exception:
         # The metadata deletion and durable PendingDeletion row are already
@@ -578,7 +597,7 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
         db.rollback()
         logger.exception(
             "delete_file: unexpected error during cleanup finalization for pending deletion %s",
-            pending.id,
+            pending_id,
         )
 
     # Record the delete activity after the metadata record has been removed.
@@ -603,9 +622,10 @@ async def delete_file(file_id: str, db: Session = Depends(get_db)):
     response_model=FileMetadata,
     summary="Rename a file",
     description=(
-        "Rename a file's user-facing name through the appropriate storage "
-        "provider adapter. Dispatches to LOCAL, GOOGLE_DRIVE, or any other "
-        "registered provider via lookup(record.provider). The physical file "
+        "Rename a file's user-facing name through the record's storage "
+        "adapter. Legacy records (NULL provider_account_id) dispatch through "
+        "the provider registry; managed records use exactly their own storage "
+        "account, with no fallback to the registry. The physical file "
         "is never modified for LOCAL records -- only the database metadata "
         "is updated. For GOOGLE_DRIVE the Drive API files().update() call "
         "changes the file's display name."
@@ -619,8 +639,10 @@ async def rename_file(
     """Rename a file via its provider adapter and persist the new name.
 
     Security guarantees:
-    - The adapter for ``record.provider`` is used exclusively; the client-
-      supplied ``file_id`` resolves only a database row.
+    - The client-supplied ``file_id`` resolves only a database row. The
+      adapter is resolved by ``resolve_file_adapter``: a legacy record uses
+      the provider registry, a managed record uses exactly its own storage
+      account, and a managed failure never falls back to the registry.
     - The adapter's rename() is called BEFORE any database changes, so a
       provider failure never leaves a half-updated database record.
     - The returned ProviderFileRecord is validated: its provider_file_id
@@ -646,14 +668,9 @@ async def rename_file(
             detail=f"File with id '{file_id}' was not found.",
         )
 
-    # 2. Resolve the adapter for the record's provider.
-    try:
-        adapter, _ = lookup(record.provider)
-    except StorageUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Storage provider unavailable: {exc}",
-        ) from exc
+    # 2. Resolve the adapter for this record (legacy registry, or the record's
+    #    exact managed account). Managed failures never fall back.
+    adapter = resolve_adapter_or_http(db, record)
 
     # 3. Call the adapter's rename() BEFORE touching the database.
     #    A provider failure must never leave a half-updated record.
@@ -666,7 +683,11 @@ async def rename_file(
     except StoragePermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except StorageUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Fixed public message: the exception detail can contain internal
+        # account IDs, credential references and provider diagnostics.
+        raise HTTPException(
+            status_code=503, detail=STORAGE_UNAVAILABLE_DETAIL
+        ) from exc
     except StorageError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -731,9 +752,10 @@ async def rename_file(
     response_model=FileMetadata,
     summary="Move a file logically",
     description=(
-        "Move a file to a different logical path through the appropriate "
-        "storage provider adapter. Dispatches to LOCAL, GOOGLE_DRIVE, or any "
-        "other registered provider via lookup(record.provider). For both "
+        "Move a file to a different logical path through the record's "
+        "storage adapter. Legacy records (NULL provider_account_id) dispatch "
+        "through the provider registry; managed records use exactly their own "
+        "storage account, with no fallback to the registry. For both "
         "LOCAL and GOOGLE_DRIVE records, this is a logical organization "
         "operation only: the physical file or Drive parent folder is NOT "
         "modified -- only the database logical_path metadata is updated."
@@ -747,8 +769,10 @@ async def move_file(
     """Move a file logically via its provider adapter and persist the new path.
 
     Security guarantees:
-    - The adapter for ``record.provider`` is used exclusively; the client-
-      supplied ``file_id`` resolves only a database row.
+    - The client-supplied ``file_id`` resolves only a database row. The
+      adapter is resolved by ``resolve_file_adapter``: a legacy record uses
+      the provider registry, a managed record uses exactly its own storage
+      account, and a managed failure never falls back to the registry.
     - The adapter's move() is called BEFORE any database changes, so a
       provider failure never leaves a half-updated database record.
     - The returned ProviderFileRecord is validated: its provider_file_id
@@ -774,14 +798,9 @@ async def move_file(
             detail=f"File with id '{file_id}' was not found.",
         )
 
-    # 2. Resolve the adapter for the record's provider.
-    try:
-        adapter, _ = lookup(record.provider)
-    except StorageUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Storage provider unavailable: {exc}",
-        ) from exc
+    # 2. Resolve the adapter for this record (legacy registry, or the record's
+    #    exact managed account). Managed failures never fall back.
+    adapter = resolve_adapter_or_http(db, record)
 
     # 3. Call the adapter's move() BEFORE touching the database.
     #    A provider failure must never leave a half-updated record.
@@ -794,7 +813,11 @@ async def move_file(
     except StoragePermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except StorageUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Fixed public message: the exception detail can contain internal
+        # account IDs, credential references and provider diagnostics.
+        raise HTTPException(
+            status_code=503, detail=STORAGE_UNAVAILABLE_DETAIL
+        ) from exc
     except StorageError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

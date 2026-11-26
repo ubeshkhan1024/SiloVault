@@ -30,11 +30,20 @@ def _descriptor(**overrides):
     return ModelDescriptor(**values)
 
 
-def test_default_catalogue_is_empty():
-    assert MODEL_CATALOGUE == ()
+def test_default_catalogue_has_florence2():
+    """Test that the default catalogue contains the Florence-2 model."""
+    assert len(MODEL_CATALOGUE) == 1
+    desc = MODEL_CATALOGUE[0]
+    assert desc.identifier == "microsoft.florence-2-base"
+    assert desc.name == "Florence-2 Base"
+    assert desc.version == "1.0"
+    assert "vision" in desc.modalities
+    assert "florence2-cpu" in (desc.compatible_runtimes or ())
+
     registry = ModelRegistry()
-    assert register_catalogue(registry) == []
-    assert registry.list_ids() == []
+    ids = register_catalogue(registry)
+    assert ids == ["microsoft.florence-2-base"]
+    assert registry.list_ids() == ["microsoft.florence-2-base"]
 
 
 def test_valid_descriptor_is_registered():

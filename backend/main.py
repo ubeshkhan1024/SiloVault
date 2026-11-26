@@ -10,6 +10,8 @@ from backend.api.v1.endpoints.google_drive import (
     _set_adapter as _set_gdrive_adapter,
     _set_startup_auth_failure as _set_gdrive_startup_failure,
 )
+from backend.api.v1.endpoints.storage_accounts import restore_managed_adapters
+from backend.storage.account_adapter_manager import adapter_manager as default_adapter_manager
 from backend.ai.bootstrap import configure_ai_model_services
 from backend.ai.lifecycle import start_ai_worker, stop_ai_worker
 from backend.config import settings
@@ -93,6 +95,30 @@ async def lifespan(app: FastAPI):
 
             # Do not register the adapter; user can reconnect via /connect
 
+    # Configure the central account adapter manager with session factory
+    default_adapter_manager.configure(lambda: SessionLocal())
+
+    # Restore account-scoped (managed) Google Drive adapters (HVSA H1.4E-B).
+    # Managed adapters live in memory only, so after a restart a managed
+    # account can be "connected" in the database while having no usable
+    # adapter.  Runs in a worker thread so per-account token refreshes cannot
+    # block the event loop, and is best-effort: each account is classified and
+    # handled independently, so a failure never aborts startup or the recovery
+    # service below.  The legacy connection above is never touched here.
+    try:
+        restored = await asyncio.to_thread(restore_managed_adapters, SessionLocal)
+    except Exception as exc:
+        logger.warning("Managed Google Drive adapter restoration failed: %s", exc)
+    else:
+        restored_count = restored.get("restored", 0)
+        failed_count = sum(restored.values()) - restored_count
+        if restored_count or failed_count:
+            logger.info(
+                "Managed Google Drive restoration: %s restored, %s not restored",
+                restored_count,
+                failed_count,
+            )
+
     # Build the recovery service before yielding so it can be accessed
     # by both the one-shot startup pass and the background worker.
     recovery = RecoveryService(lambda: SessionLocal())
@@ -126,6 +152,14 @@ async def lifespan(app: FastAPI):
             await stop_ai_worker(app)
         except Exception as exc:
             logger.warning("AI worker shutdown failed: %s", exc)
+
+        # Shut down AI model services (including vision runtime)
+        ai_models = getattr(app.state, "ai_models", None)
+        if ai_models is not None:
+            try:
+                ai_models.shutdown()
+            except Exception as exc:
+                logger.warning("AI model services shutdown failed: %s", exc)
 
         # Stop the background worker gracefully on shutdown.
         worker_task.cancel()

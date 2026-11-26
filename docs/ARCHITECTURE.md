@@ -16,13 +16,13 @@ To ensure clarity across all documentation, architecture elements are categorize
 
 | Status | Definition | Components |
 |---|---|---|
-| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton, PWA frontend shell, SQLite database with Alembic migrations, `UnifiedFileRecord` model, local file operations (upload, list, detail, download, quarantine-based delete), plus rename and logical-move endpoints, activity history, Google Drive OAuth flow, storage adapter registry (LOCAL + GOOGLE_DRIVE), background deletion recovery service, 722 passing automated tests in the latest full run (3 skipped). M4.0 AI architecture planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested. M4.4 AI worker infrastructure (lease heartbeat, expired-lease recovery, processor registration, lifespan integration) is implemented and tested. The full AI pipeline, mobile uploader, approval workflow (frontend), and additional cloud-provider adapters remain incomplete. |
+| **Implemented** | Currently existing and active in repository | Documentation, project guidelines, `.gitignore`, FastAPI application skeleton, PWA frontend shell, SQLite database with Alembic migrations, `UnifiedFileRecord` model, local file operations (upload, list, detail, download, quarantine-based delete), plus rename and logical-move endpoints, activity history, Google Drive OAuth flow, storage adapter registry (LOCAL + GOOGLE_DRIVE), background deletion recovery service, account-scoped Google Drive OAuth, the HVSA H1.5.3 storage-account management API (list, detail, create, partial update) with cross-account isolation, HVSA H1.5.4 account-scoped file operations (download, rename, logical move, delete/quarantine, recovery and upload routed through the record's own storage account), and 1792 passing automated tests in the latest full run (3 skipped, 1 warning). M4.0 AI architecture planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested. M4.4 AI worker infrastructure (lease heartbeat, expired-lease recovery, processor registration, lifespan integration) is implemented and tested. The full AI pipeline, mobile uploader, approval workflow (frontend), and additional cloud-provider adapters remain incomplete. |
 | **Planned** | Approved core requirement, design in progress | Unified Storage Service orchestration layer, OneDrive/Dropbox/Box Adapters, Mobile Inbox intake, AI Pipeline (Ollama), Human Review Queue, Reversible storage rules |
 | **Proposed** | Architectural choice under evaluation | Multi-provider adapters (MEGA with E2EE), Supabase for Cloud Control Plane, Cross-device metadata sync |
 | **Future Possibility** | Concept for potential future extension | Additional storage providers (AWS S3, Nextcloud), multi-device sync, local vector DB / semantic search |
 
 > [!NOTE]
-> M1 and M2 are complete; M3.1 and the current M3.2 implementation checkpoint are complete. The SQLite database, `UnifiedFileRecord`, Alembic-managed schema, local file operations, rename and logical-move APIs, Google Drive OAuth foundation, provider registry, and background deletion-recovery foundation are implemented. The latest full test run reported 722 passed, 3 skipped, 0 failed, and 1 warning. Automated Google Drive tests use mocked services. Provider adapter capability must not be confused with API endpoint parity: the generic DELETE endpoint dispatches through the registered provider adapter — it is not LOCAL-only. Provider dispatch depends on a registered adapter — if an adapter is unavailable, the endpoint returns an appropriate unavailable response (HTTP 503). M4.0 architecture planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested. The full AI processing pipeline, mobile uploader, frontend approval workflow, and additional provider adapters remain incomplete.
+> M1 and M2 are complete; M3.1 and the current M3.2 implementation checkpoint are complete. The SQLite database, `UnifiedFileRecord`, Alembic-managed schema, local file operations, rename and logical-move APIs, Google Drive OAuth foundation, provider registry, and background deletion-recovery foundation are implemented. The HVSA H1.5.3 storage-account management API (list, detail, create, partial update) is implemented with server-generated credential references and cross-account isolation, and HVSA H1.5.4 routes download, rename, logical move, delete/quarantine, recovery and upload through the record's own storage account (§7.11). The latest full test run (26 November 2026) reported 1792 passed, 3 skipped, 0 failed, and 1 warning, with the preserved duplicate module `tests/test_m52_vision_runtime_new.py` excluded. Automated Google Drive tests use mocked services. Provider adapter capability must not be confused with API endpoint parity: the generic DELETE endpoint dispatches through the registered provider adapter — it is not LOCAL-only. Provider dispatch depends on a registered adapter — if an adapter is unavailable, the endpoint returns an appropriate unavailable response (HTTP 503). M4.0 architecture planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested. The full AI processing pipeline, mobile uploader, frontend approval workflow, and additional provider adapters remain incomplete.
 
 ---
 
@@ -237,7 +237,7 @@ This ensures that UI, search, classification, and organization modules operate i
 
 ### 4.2 Unified Storage Service
 * **Orchestration:** Sits between the API router and individual provider adapters.
-* **Account Management:** Manages multiple connected storage accounts (e.g., multiple Google Drive accounts, personal OneDrive, work Dropbox).
+* **Account Management:** Manages multiple connected storage accounts (e.g., multiple Google Drive accounts, personal OneDrive, work Dropbox). The implemented storage-account CRUD API, credential references, and cache isolation are documented in §7.10.
 * **Virtual Namespace:** Provides a unified browsing and search directory structure across multiple accounts.
 * **Operation Logging & Rollback:** Intercepts move/rename operations to ensure reversible actions are recorded before execution.
 
@@ -292,13 +292,17 @@ alembic/
 ├── env.py                     # Imports app settings + Base.metadata; runs migrations
 ├── script.py.mako             # Template for new revision scripts
 └── versions/
-    └── b436c12118f9_create_unified_file_records_baseline.py   # baseline migration
+    ├── b436c12118f9_create_unified_file_records_baseline.py   # baseline migration
+    ├── ...                                                    # later schema revisions
+    └── 20261125120000_h1_5_3_credentials_ref_trimmed_unique.py # current head (b7c4e1a92f30)
 ```
 
 ### Current state
 
 - Baseline revision `b436c12118f9` represents the `UnifiedFileRecord` schema as of M1.
 - The existing development database was verified schema-identical to the baseline and **stamped** (no DDL executed) at `b436c12118f9`; existing records were preserved.
+- The current head is `b7c4e1a92f30` (`20261125120000_h1_5_3_credentials_ref_trimmed_unique.py`), which creates the migration-owned partial unique expression index `uq_storage_accounts_credentials_ref_trimmed` on `trim(credentials_ref, char(9,10,11,12,13,32)) WHERE credentials_ref IS NOT NULL`. Exactly one head exists.
+- The index is intentionally **not** declared in model metadata: SQLite reflection skips expression indexes, so declaring it would make autogenerate attempt to recreate it. Alembic owns the index.
 
 ### Commands
 
@@ -316,7 +320,7 @@ See [README.md](../README.md#database-migrations-alembic) for the full developer
 
 **Status: Implemented through the current M3.2 checkpoint; M4.0 complete and M4.1 in progress**
 
-The current storage and Google Drive integration work is covered by the latest full suite (722 passed, 3 skipped, 0 failed, 1 warning). M4.0 planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested; actual AI processing capabilities remain unfinished. This section documents implemented behavior and calls out remaining API limitations explicitly.
+The current storage, Google Drive, storage-account and account-scoped file-operation work is covered by the latest full suite (1792 passed, 3 skipped, 0 failed, 1 warning). M4.0 planning is complete. M4.1 worker processing, proposal storage, and backend approval/rejection workflows are implemented and tested; actual AI processing capabilities remain unfinished. This section documents implemented behavior and calls out remaining API limitations explicitly.
 
 ### 7.1 Google Drive OAuth and Credential Management
 
@@ -327,33 +331,64 @@ The current storage and Google Drive integration work is covered by the latest f
 - **Security:** OAuth callback query strings (which contain the authorization code) are suppressed from request logging. Secrets are never included in API responses. On authentication failure during connect, stored credentials are cleaned up.
 - **Startup restoration:** On application startup the backend attempts to restore the Google Drive connection from stored credentials (best-effort; failures do not block startup, and the LOCAL adapter always operates).
 
+#### Account-scoped credentials (HVSA H1.4C)
+
+- **Per-account keyring entries:** The credential helpers in `backend/storage/credentials.py` accept an optional `credentials_ref`. When supplied, the keyring *account* name is a SHA-256 digest of that reference, so each `StorageAccount` reads and writes its own entry. When `credentials_ref` is `None` the legacy `"google-drive"` entry is used unchanged.
+- **Adapter scoping:** `GoogleDriveAdapter(credentials=..., credentials_ref=...)` scopes both credential loads/stores and SiloVault root-folder persistence to that reference. A scoped adapter never reads or writes the legacy entry, and two accounts therefore cannot see each other's refresh token or root-folder ID.
+- **Factory wiring:** `AdapterFactory` passes `StorageAccount.credentials_ref` to the created Google Drive adapter, so adapters built for different accounts are isolated even though they use the same provider. Adapter construction still performs no database access and no authentication.
+- **Disconnect:** `GoogleDriveAdapter.disconnect()` clears in-memory state only; it never deletes keyring entries, so disconnecting one account cannot remove another account's credentials.
+- **Legacy HTTP endpoints:** `POST /api/v1/google-drive/connect`, `GET /api/v1/google-drive/status` and `DELETE /api/v1/google-drive/disconnect` continue to operate on the single legacy `"google-drive"` entry exactly as before. They are unaffected by, and never touch, managed-account credentials.
+
+#### Account-scoped OAuth endpoints (HVSA H1.4D)
+
+- **Endpoints (managed accounts only):**
+  - `POST /api/v1/storage-accounts/{account_id}/google-drive/connect`
+  - `GET /api/v1/storage-accounts/{account_id}/google-drive/status`
+  - `DELETE /api/v1/storage-accounts/{account_id}/google-drive/disconnect`
+- **Account validation:** The account must exist (`404` otherwise) and must have `provider_id == "GOOGLE_DRIVE"`. `LOCAL` accounts and every other provider are rejected with `400`; provider IDs and account IDs are never treated as interchangeable.
+- **Credential reference:** The server resolves `StorageAccount.credentials_ref`. If the record has none yet, a server-generated reference is persisted through `AccountManager` before the flow starts, so a client can never choose another account's reference. The OAuth backfill uses the deterministic `storage-account:<account id>` form; accounts created through `POST /api/v1/storage-accounts` instead receive `storage-account:<uuid4>` from the create endpoint. No schema change is required — the column already exists.
+- **Connect:** Runs the same installed-app loopback OAuth flow (PKCE plus `state` validation) as the legacy endpoint, through `_run_oauth_flow(credentials_ref=..., promote_to=...)`. The token is written to a per-attempt staging entry, authenticated, and only then promoted into that account's permanent keyring entry (HVSA H1.4F); the returned adapter is scoped to the permanent reference, so SiloVault root-folder state is isolated too. On success the account status becomes `"connected"`. On `state_mismatch`, timeout, missing refresh token, or exchange/authentication failure the account record is left unchanged, only this attempt's staging entry is removed, and any previously stored credential for the account survives untouched.
+- **Callback binding:** The account identity never travels through the OAuth callback. The callback is validated by the existing `state` mechanism and the account binding comes from the server-side request path, so a callback cannot be replayed against, or reassigned to, another account.
+- **Status:** Returns `account_id`, `provider_id`, `display_name`, `status`, `connected`, `credentials_present` and `adapter_present` only. It reads this account's keyring entry (never the legacy entry) and performs no provider call. Tokens, credential objects, and client secrets are never returned. `status` is the persisted database value (reported as `disconnected` when this account's own credential entry is gone); `adapter_present` says whether an authenticated in-memory adapter for this account is installed (the legacy adapter never counts); `connected` is the runtime answer and is true only when the database says `connected`, the credentials exist, and the managed adapter is installed.
+- **Disconnect:** Deletes only `delete_google_drive_credentials(credentials_ref=account.credentials_ref)`, drops that account's in-memory adapter, and marks the account `"disconnected"`. It never calls the legacy no-argument deletion, never removes the `StorageAccount` record, never touches Drive files, and is idempotent on repeat.
+- **Provider registry:** Managed adapters are kept in an in-memory per-account map and are deliberately **not** registered under the provider-level `"GOOGLE_DRIVE"` registry key, which stays reserved for the legacy connection. Dispatching business endpoints to a specific managed account remained out of scope for H1.4D and was implemented later in HVSA H1.5.4 (§7.11).
+- **Credential-reference integrity (HVSA H1.4E-A):** `AccountManager` validates every `credentials_ref` before storing it: references are trimmed, empty/whitespace-only values and values longer than the column are rejected, and a reference already used by a *different* account is refused on both create and update (an account may always keep its own reference). Collision detection is a service-layer scan over trimmed values, so rows written before this validation still count. Uniqueness is enforced twice: the service-layer scan above and, since HVSA H1.5.3, a migration-owned partial unique expression index `uq_storage_accounts_credentials_ref_trimmed` on `trim(credentials_ref, char(9,10,11,12,13,32)) WHERE credentials_ref IS NOT NULL`. The index covers the ASCII whitespace set (space, TAB, LF, VT, FF, CR) because SQLite's one-argument `trim()` strips only spaces; Unicode whitespace such as U+00A0 is **not** covered by the index, and Python `str.strip()` in `AccountManager` remains the authoritative check for those variants. The migration aborts instead of rewriting data if normalized duplicates already exist.
+- **Database uniqueness (HVSA H1.4F, resolved by H1.5.3):** The scan-then-insert check in `AccountManager` is not atomic on its own, so two truly simultaneous account creations with the same reference could both pass validation. The migration-owned partial unique expression index described above now provides the database-level guarantee; it was added together with the account CRUD API. The service-layer validation remains in place because it produces clear 409 responses and still detects whitespace variants in rows written before the validation existed; it must not be removed.
+- **Staged credential replacement (HVSA H1.4F):** A managed connect never writes straight into the account's permanent entry. Each attempt gets a unique staging reference (`<permanent ref>:staging:<uuid4 hex>`) that exists only in the current keyring write, is never persisted in the database, never returned to a client, and never logged. The sequence is *stage → authenticate → promote*: on success the credential is written to the permanent entry and the staging entry is deleted; on any failure only the staging entry is deleted. The keyring has no atomic rename, so promotion is a second `set_password`; if that write fails the previous permanent value stands and only the staging entry is removed. A failed reconnect — invalid credentials, provider outage, or a failed promotion — therefore always leaves the previously working credential intact.
+- **Cleanup ownership (HVSA H1.4F):** Every failure path cleans up by the reference the operation itself wrote, so cleanup can only remove that attempt's staging entry. It never removes another account's entry (references are otherwise unique), never removes the permanent entry, and never removes the legacy `"google-drive"` entry (`_discard_scoped_credentials(None)` is a no-op by design). Cleanup is best-effort: a locked keyring (`CredentialStorageError`) or an unexpected backend error such as `OSError` is swallowed and only the exception type is logged, so it can never replace the original authentication/provider failure or turn a failed connect into a success.
+- **Status-persistence failure (HVSA H1.4F):** If the status commit fails after a successful exchange, the session is rolled back and the adapter is not installed, so an account never reports usable while its status was not persisted. The newly promoted credential is retained (it authenticated successfully and belongs to this account) while the attempt's staging entry is removed. Cleanup uses the account ID captured before the rollback, so error handling never reads ORM attributes that rollback may have expired or detached.
+- **Concurrency (HVSA H1.4E-A / H1.4F):** Connect and disconnect hold a narrow per-account lock for the whole operation (configured through a reference-counted lock map that drops idle entries). Same-account operations are serialized — a later connect cannot have its token deleted by an earlier failed one, and a disconnect waits for an in-flight connect — while different accounts proceed independently. The reference is taken before the wait and always returned in `finally` (including when acquisition is interrupted), and an entry is deleted only when its count reaches zero **and** the map still holds the exact entry the caller registered. One interruption window is documented rather than engineered around: a `KeyboardInterrupt` delivered between `lock.acquire()` returning and the internal flag being set would leave that lock held. Status reads take no lock. Because the route handlers are synchronous, blocking on this lock never stalls the event loop.
+- **Restart reconciliation (HVSA H1.4E-B):** Startup calls `restore_managed_adapters(session_factory)` from the application lifespan, after the legacy Google Drive restoration and before the recovery service and AI worker start. It reads a snapshot of managed `GOOGLE_DRIVE` accounts whose status is `connected` and that have a credential reference in one short-lived session, then rebuilds each adapter independently from that account's own scoped keyring entry and installs it in the per-account map (never in the provider registry, never replacing the legacy adapter). The sweep runs in a worker thread and is best-effort: one account's failure never blocks startup or the remaining accounts.
+- **Restart failure classification (HVSA H1.4E-B):** Successful authentication installs the adapter and leaves status and credentials untouched. `StorageAuthenticationError` installs nothing, marks the account `disconnected`, and **preserves** the keyring entry so the user can reconnect. `StorageUnavailableError` (transient provider failure) and `CredentialStorageError` (locked/unavailable keyring) install nothing but preserve both status and credentials. A missing scoped credential entry installs nothing and marks the account `disconnected`; the legacy entry is never used as a fallback. Reconciliation never deletes credentials.
+
 ### 7.2 Storage Adapter and Provider Registry
 
 - **Interface:** `StorageOperations` (abstract) defines the mandatory operations: `upload`, `download`, `rename`, `move`, `quarantine`, `restore`, `cleanup`. `StorageLifecycle` (optional) adds `authenticate`, `refresh`, `disconnect` for cloud providers; `LocalAdapter` deliberately does not implement it.
-- **Registry:** Adapters are registered under canonical provider IDs (`LOCAL`, `GOOGLE_DRIVE`) during application lifespan setup via `register(provider_id, adapter, capabilities)`; endpoints dispatch through `lookup(provider_id)`. Unknown providers raise `StorageUnavailableError` (mapped to HTTP 503).
+- **Registry:** Adapters are registered under canonical provider IDs (`LOCAL`, `GOOGLE_DRIVE`) during application lifespan setup via `register(provider_id, adapter, capabilities)`. The registry serves **legacy/provider-level** records only: a record whose `provider_account_id` is `NULL` dispatches through `lookup(provider_id)`, and a record that names a managed storage account resolves through `resolve_file_adapter()` instead (§7.11). Unknown providers raise `StorageUnavailableError` (mapped to HTTP 503).
 - **Google Drive adapter:** `GoogleDriveAdapter` implements all seven `StorageOperations` methods plus the lifecycle hooks. It manages a dedicated "SiloVault" root folder (discovered or created, with the folder ID persisted to the keyring). All Drive API `HttpError`s are mapped to the SiloVault storage error hierarchy (404 → not found, 403 → permission, 429/403 rate-limit → rate limit, 413 → quota, 5xx → unavailable).
 
 ### 7.3 Upload and Download Integration
 
-- **Upload:** `POST /api/v1/uploads` accepts a `provider` query parameter (default `LOCAL`) and dispatches through the registry. For GOOGLE_DRIVE, files are uploaded to the SiloVault root folder via resumable upload.
-- **Download:** `GET /api/v1/files/{file_id}/download` dispatches through `lookup(record.provider)`; the client-supplied `file_id` resolves only a database row, and the provider-assigned identifier is passed verbatim to the adapter.
+- **Upload:** `POST /api/v1/uploads` accepts a `provider` query parameter (default `LOCAL`) and an optional `account_id`. Without `account_id` the request dispatches through the registry exactly as before (legacy, `provider_account_id` stays `NULL`). With `account_id` the request resolves that exact managed account through `resolve_file_adapter()`, the account's provider must match `provider`, and the ID is persisted as the new record's `provider_account_id`. Empty or whitespace-only `account_id` is rejected with `422`; an unknown account is `404`, a provider mismatch `409`, and a disconnected or unavailable account `503` (§7.11). For GOOGLE_DRIVE, files are uploaded to the SiloVault root folder via resumable upload.
+- **Download:** `GET /api/v1/files/{file_id}/download` resolves its adapter with `resolve_file_adapter()`: a legacy record (`provider_account_id` `NULL`) dispatches through `lookup(record.provider)`, a managed record resolves exactly its own storage account (§7.11). The client-supplied `file_id` resolves only a database row, and the provider-assigned identifier is passed verbatim to the adapter.
 - **Listing/Detail:** `GET /api/v1/files` and `GET /api/v1/files/{file_id}` serve from the unified metadata database regardless of provider.
 
 ### 7.4 Deletion and Recovery Workflow
 
-- **Endpoint:** `DELETE /api/v1/files/{file_id}` dispatches through the registered provider adapter. For LOCAL records, quarantine-based deletion with recovery is performed. For GOOGLE_DRIVE, the generic endpoint dispatches through the registered Google Drive adapter and its quarantine/cleanup workflow is covered by mocked tests. Live Google Drive verification remains outstanding, and this does not establish deletion parity for other cloud providers. If an adapter is unavailable, the endpoint returns HTTP 503.
-- **Protocol:** Three-phase transaction — (1) quarantine the physical file, (2) delete the metadata record and write a durable `PendingDeletion` row in the same transaction, (3a) on commit success, run physical cleanup; (3b) on commit failure, restore the quarantined file so nothing is lost.
-- **Recovery service:** A background worker (plus a one-shot startup pass) processes `PendingDeletion` records. It uses claim tokens and leases (5-minute lease, renewed by a heartbeat while cleanup runs) to coordinate ownership between the API and the worker, with exponential-backoff retries (up to 5) before a record is marked `FAILED`.
+- **Endpoint:** `DELETE /api/v1/files/{file_id}` resolves its adapter with `resolve_file_adapter()` — legacy records through the registered provider adapter, managed records through exactly their own storage account (§7.11) — and the same resolved instance performs quarantine, rollback restoration and cleanup. For LOCAL records, quarantine-based deletion with recovery is performed. For GOOGLE_DRIVE, the generic endpoint dispatches through the registered Google Drive adapter and its quarantine/cleanup workflow is covered by mocked tests. Live Google Drive verification remains outstanding, and this does not establish deletion parity for other cloud providers. If an adapter is unavailable, the endpoint returns HTTP 503.
+- **Protocol:** Three-phase transaction — (1) quarantine the physical file, (2) delete the metadata record and write a durable `PendingDeletion` row in the same transaction, (3a) on commit success, run physical cleanup; (3b) on commit failure, restore the quarantined file so nothing is lost. The `PendingDeletion` row stores the deleted record's `provider_account_id` (`NULL` for legacy records), so cleanup and any RESTORE row created by a failed rollback resolve the same account.
+- **Recovery service:** A background worker (plus a one-shot startup pass) processes `PendingDeletion` records. Each claimed record's adapter is resolved with `resolve_file_adapter()`; an unknown account, a provider mismatch, a disconnected account or an unavailable credential store schedules a transient retry with the row and its ownership intact, and is never treated as a missing file. It uses claim tokens and leases (5-minute lease, renewed by a heartbeat while cleanup runs) to coordinate ownership between the API and the worker, with exponential-backoff retries (up to 5) before a record is marked `FAILED`.
 - **Known limitations (do not overstate the safety guarantees):**
   - The lease/claim mechanism provides a strong ownership convention at the database level, but it is **not** a perfectly concurrency-safe guarantee in the distributed-systems sense: if a process is hard-killed (e.g., power loss) while a physical cleanup is in flight, a second worker can claim the record after the lease expires and re-run cleanup. Cleanup is written to be idempotent (an already-absent resource is treated as success), which is the practical mitigation.
   - The heartbeat thread uses a 10-second join timeout; if it has not stopped, finalization and retry scheduling are skipped and the record is left for recovery after lease expiry.
+  - **Heartbeat identity (HVSA H1.5.4 Step 7):** The `PendingDeletion` primary key is assigned before the delete transaction commits and held as a plain string. The heartbeat thread, the conditional finalize/retry statements and every log call use that scalar, so no code path reads attributes from the request-session ORM instance after `commit()` expires it. This removes the cross-thread refresh that could raise `ObjectDeletedError` (and surface as HTTP 500) when cleanup outlived a heartbeat tick.
   - The generic `DELETE /api/v1/files/{file_id}` endpoint dispatches through the registered provider adapter; it is not LOCAL-only. Google Drive deletion through this endpoint is implemented and covered by mocked adapter tests, but must not be described as live-provider verified. Other cloud providers still require their own implementation and verification.
   - A complete user-facing restore workflow is not implemented. The RESTORE recovery operation is a failure-recovery foundation, not a general restore UI/API.
 
 ### 7.5 File Rename API
 
 - **Endpoint:** `PATCH /api/v1/files/{file_id}/rename` with body `{"new_name": "..."}` (1–255 characters, whitespace-only rejected).
-- **Dispatch:** Provider-neutral via `lookup(record.provider)`; supports LOCAL and GOOGLE_DRIVE.
+- **Dispatch:** Provider-neutral via `resolve_file_adapter()` — a legacy record uses `lookup(record.provider)`, a managed record uses exactly its own storage account, and a managed-account failure never falls back to the registry (§7.11); supports LOCAL and GOOGLE_DRIVE.
 - **Behavior:**
   - **LOCAL:** The physical storage filename (server-generated UUID) is **not** changed. Only the user-facing `name` in the database is updated.
   - **GOOGLE_DRIVE:** The **actual Google Drive filename is changed** via the Drive API (`files().update` with the new name).
@@ -362,7 +397,7 @@ The current storage and Google Drive integration work is covered by the latest f
 ### 7.6 Logical Move API
 
 - **Endpoint:** `PATCH /api/v1/files/{file_id}/move` with body `{"target_logical_path": "..."}` (1–1024 characters, whitespace-only rejected).
-- **Dispatch:** Provider-neutral via `lookup(record.provider)`; supports LOCAL and GOOGLE_DRIVE.
+- **Dispatch:** Provider-neutral via `resolve_file_adapter()` — a legacy record uses `lookup(record.provider)`, a managed record uses exactly its own storage account, and a managed-account failure never falls back to the registry (§7.11); supports LOCAL and GOOGLE_DRIVE.
 - **Behavior:**
   - **LOCAL:** The physical file stays in place; only the `logical_path` in the database is updated. Local storage keeps its existing flat physical file organization.
   - **GOOGLE_DRIVE:** This is a **logical organization operation only** — SiloVault's `logical_path` is updated, but the **Google Drive parent folder is not changed**. The file remains in its original Drive location.
@@ -370,7 +405,7 @@ The current storage and Google Drive integration work is covered by the latest f
 
 ### 7.7 Verification Status
 
-- The latest full automated test run reported **722 passed, 3 skipped, 0 failed, 1 warning**. Google Drive automated tests use mocked Drive API services and a fake keyring. Treat manual smoke checks and mocked automated tests as different evidence; neither alone constitutes production readiness. The generic DELETE endpoint dispatches through the registered provider adapter — it is not LOCAL-only at this checkpoint, even though the Google Drive adapter and recovery abstractions contain provider-level functionality.
+- The latest full automated test run (26 November 2026) reported **1792 passed, 3 skipped, 0 failed, 1 warning**, with the preserved duplicate module `tests/test_m52_vision_runtime_new.py` excluded. The single warning is the Starlette deprecation for `HTTP_422_UNPROCESSABLE_ENTITY` (replacement: `HTTP_422_UNPROCESSABLE_CONTENT`). Google Drive automated tests use mocked Drive API services and a fake keyring. Treat manual smoke checks and mocked automated tests as different evidence; neither alone constitutes production readiness. The generic DELETE endpoint dispatches through the registered provider adapter — it is not LOCAL-only at this checkpoint, even though the Google Drive adapter and recovery abstractions contain provider-level functionality.
 
 ### 7.8 M3.2 Stage A — Database Foundation (Implemented)
 
@@ -396,3 +431,116 @@ The heartbeat interval and recovery batch size are configurable.
 Shutdown stops accepting tasks first, wakes the poll wait, and waits up to 30 seconds for the in-flight cycle to finish before cancelling the loop. The pre-existing pending-deletion poll loop waits with `asyncio.sleep`, so cancelling it releases the loop immediately instead of leaving a non-cancellable sleeping executor thread. A processor that still outlives that grace period cannot be interrupted, but its session is closed by the worker's existing `finally` blocks. Startup failures (missing model services, invalid intervals, construction errors) are recorded on `app.state.ai_worker_error` and never block the application; when no capability is executable the worker registers no processors and only performs recovery.
 
 **Processor registration:** `backend/ai/registration.py` is the composition root that connects `TextClassificationProcessor` to `AiWorkerService`. `build_task_processors` builds processors only for capabilities the current profile can execute, so a missing model or runtime leaves tasks `PENDING` instead of claiming them and marking them `FAILED`. `register_task_processors` validates the whole mapping before applying it and refuses a conflicting processor for an already-registered task type (re-registering the identical callable is a no-op). `build_ai_worker` returns a configured worker without starting it. A task type with no registered processor is reported as unsupported before any claim, so its row is never left in `PROCESSING`.
+
+### 7.10 Storage Account Management API (HVSA H1.5.3)
+
+**Status: Implemented for list, detail, create, and partial update. Account-scoped file routing is implemented separately in §7.11 (HVSA H1.5.4); account deletion and an account-management UI are not implemented.**
+
+#### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/storage-accounts` | List every account, optionally filtered by `provider_id` |
+| `GET` | `/api/v1/storage-accounts/{account_id}` | Retrieve one account |
+| `POST` | `/api/v1/storage-accounts` | Create an account (`201`) |
+| `PATCH` | `/api/v1/storage-accounts/{account_id}` | Partially update `display_name` and/or `configuration` |
+
+Account-scoped Google Drive OAuth remains available under `/api/v1/storage-accounts/{account_id}/google-drive/...` (§7.1).
+
+#### Schemas and behavior
+
+- **Responses:** `StorageAccountResponse` returns `id`, `provider_id`, `display_name`, `status`, `configuration`, `created_at`, and `updated_at`. It never returns `credentials_ref`, tokens, or any credential material. The collection response is `{items, total}` and is not paginated, because `AccountManager.list_accounts` returns every match.
+- **Create:** The client supplies `provider_id`, `display_name`, and an optional JSON `configuration`; unknown fields (including `credentials_ref`) are rejected with `422`. The server generates `credentials_ref = storage-account:<uuid4>` and the account starts `pending` with no adapter installed. Invalid provider or display name is `422`; a reference collision is `409`. The handler validates provider identity and JSON serializability before writing, and rolls back on failure.
+- **Update:** `PATCH` applies only the fields present in the body. `null` leaves the existing value unchanged, an empty body is a no-op, and `provider_id` / `credentials_ref` are rejected as unknown fields. Unknown accounts return `404`; invalid names or non-finite configuration values return `422`. `configuration` replaces the stored document rather than merging into it.
+- **Status independence:** All four documented statuses (`pending`, `connected`, `disconnected`, `error`) can be read, listed, and updated. Status is never changed by CRUD operations.
+- **Provider filter:** `GET /api/v1/storage-accounts?provider_id=...` validates the identifier with the same canonical rule as the provider registry; an invalid value returns `400`, while a valid provider with no accounts returns `{items: [], total: 0}`.
+
+#### Credential references and uniqueness
+
+- References are always server-generated. `POST` uses a fresh UUID; the Google Drive OAuth backfill uses `storage-account:<account id>`. A client can never select a keyring entry.
+- The service-layer validation in `AccountManager` trims references, rejects empty/whitespace-only and over-long values, and rejects a reference used by another account (`409` through the API).
+- The migration-owned partial unique expression index `uq_storage_accounts_credentials_ref_trimmed` enforces uniqueness at the database level over the ASCII whitespace set. Unicode whitespace variants are not covered by the index; the Python-side check remains authoritative for them (§7.1).
+
+#### Cache invalidation and isolation
+
+- `PATCH` passes `adapter_manager.invalidate_account` as the post-commit callback. `AccountManager.update_account` invokes it only when `credentials_ref` changes or a LOCAL account's `storage_root` changes; a display-name change, an unrelated configuration change, an equivalent `Path` spelling, or a failed commit invalidates nothing.
+- Invalidation is per account. Creating or updating account A never evicts account B's cached adapter, and two accounts of the same provider keep separate adapters and separate keyring entries.
+- Managed adapters live only in the `AccountAdapterManager` cache and are never installed in the provider registry.
+
+#### Boundaries
+
+- Business file endpoints (`/api/v1/uploads`, `/api/v1/files/...`) are **account-aware** since HVSA H1.5.4: a record that names a storage account resolves exactly that account and never silently falls back to the provider registry, while a legacy record (`provider_account_id` `NULL`) keeps the previous provider-registry behavior (§7.11).
+- There is no account `DELETE` endpoint; disconnecting Google Drive removes that account's credentials and adapter but keeps the `StorageAccount` row (§7.1).
+- There is no account-management UI; the API is the only interface.
+- Cross-account isolation is covered by `tests/test_storage_account_cross_account_isolation.py` (HTTP boundary) and `tests/test_account_adapter_cross_isolation.py` (adapter cache and registry boundary).
+
+### 7.11 Account-Scoped File Operations (HVSA H1.5.4)
+
+**Status: Implemented for download, rename, logical move, delete/quarantine/restore, recovery and upload. The application imposes no account-count limit.**
+
+#### Two dispatch layers
+
+- **Provider registry** (`backend/storage/registry.py`): one adapter per provider ID (`LOCAL`, `GOOGLE_DRIVE`), installed during lifespan setup. It serves legacy/provider-level records and is never used for a record that names a storage account.
+- **`AccountAdapterManager`** (`backend/storage/account_adapter_manager.py`): the per-account adapter cache. It resolves exactly one `StorageAccount` by ID, loads that account's own scoped credentials, authenticates cloud adapters, and installs an adapter only after successful authentication. Managed adapters are never registered in the provider registry.
+
+#### `resolve_file_adapter()`
+
+`backend/storage/file_account_resolution.py` owns the single routing decision:
+
+- `provider_account_id is None` → `lookup(record.provider)`; behavior is identical to pre-H1.5.4.
+- `provider_account_id is not None` → that exact `StorageAccount`, through `AccountManager` (existence and provider check) and `AccountAdapterManager.resolve()`.
+
+Fail-closed rules — there is no fallback branch: a managed-account failure never reaches the provider registry.
+
+| Condition | Raised | HTTP at the API boundary |
+|---|---|---|
+| Account does not exist | `StorageAccountNotFoundError` | `404` |
+| Account's provider differs from the record's provider | `StorageAccountProviderMismatchError` | `409` |
+| Account is disconnected, lacks credentials, or fails authentication | `StorageAccountNotConnectedError` | `503` |
+| Credential store unavailable, or repeated invalidation during construction | `StorageUnavailableError` | `503` |
+| Legacy record whose provider is not registered | `StorageUnavailableError` | `503` |
+
+The helper performs no storage operation, no credential access and no database write; it only resolves and returns an adapter instance. HTTP mapping lives in `backend/api/v1/endpoints/account_adapter_http.py` (`resolve_adapter_or_http`). The three typed account errors map to fixed generic messages that contain no account ID, credential reference, token or chained exception text.
+
+#### Operation coverage
+
+| Operation | Entry point | Adapter resolution | Account ownership |
+|---|---|---|---|
+| Download | `GET /api/v1/files/{file_id}/download` | `resolve_adapter_or_http` | record unchanged |
+| Rename | `PATCH /api/v1/files/{file_id}/rename` | `resolve_adapter_or_http` | record unchanged; only `name` / `updated_at` written |
+| Logical move | `PATCH /api/v1/files/{file_id}/move` | `resolve_adapter_or_http` | record unchanged; only `logical_path` / `updated_at` written |
+| Delete / quarantine | `DELETE /api/v1/files/{file_id}` | `resolve_adapter_or_http` | `PendingDeletion.provider_account_id` copied from the record; the same adapter performs quarantine, rollback restore and cleanup |
+| Recovery cleanup | `PendingDeletion` with `operation_type=CLEANUP` | `resolve_file_adapter` in `RecoveryService` | row retains `provider_account_id`; any resolution failure schedules a transient retry |
+| Recovery restore | `PendingDeletion` with `operation_type=RESTORE` | `resolve_file_adapter` in `RecoveryService` | same |
+| Upload | `POST /api/v1/uploads?account_id=...` | `resolve_adapter_or_http` with a request-shaped target | the new record stores `provider_account_id`; DB-failure compensation reuses the same resolved adapter |
+
+- **LOCAL rename/move:** metadata-only. The physical file keeps its server-generated UUID filename and its flat location; only `name` / `logical_path` change in the database.
+- **Google Drive move:** logical only — `logical_path` changes while the Drive parent folder does not. Google Drive rename does change the Drive filename through `files().update`.
+- **No account-count limit:** accounts are addressed individually; the application defines no maximum number of accounts, no quota and no "default" account selection.
+
+#### Known limitations
+
+- **Cloud upload compensation:** if a cloud provider upload succeeds and the following database commit fails, the endpoint compensates only `LOCAL` uploads (quarantine + cleanup through the same resolved adapter). For cloud providers no compensating provider deletion is attempted, so an orphaned provider file can remain. This is a pre-existing limitation, unchanged by H1.5.4.
+- **Storage-unavailable responses are sanitized (HVSA H1.5.4 Step 6):** every `StorageUnavailableError` that reaches an endpoint — from account resolution, an adapter operation, or a legacy registry lookup — is answered with `503` and the single fixed public message `Storage provider is temporarily unavailable.` The endpoint code never echoes the exception string, so internal account IDs, credential references, tokens, keyring text and provider diagnostics remain only in the server-side `__cause__` chain and logs. The message lives in one constant, `STORAGE_UNAVAILABLE_DETAIL`, in `backend/api/v1/endpoints/account_adapter_http.py`.
+- **Legacy OAuth errors are sanitized (HVSA H1.5.4 Step 7):** `_establish_connection` returns only the stable codes `credential_storage_failed`, `authentication_failed` or `provider_unavailable`, and `POST /api/v1/google-drive/connect` answers any other flow failure with `500` and the fixed message `OAuth flow failed.` Only the exception type is logged server-side; keyring text, account identifiers, credential references, tokens, paths and raw exception strings never reach a response. The `state_mismatch` (400), `timeout` (408), `no_refresh_token` (400) and success responses are unchanged, as are the managed account-scoped endpoints.
+- **No account-scoped listing or filtering:** `GET /api/v1/files` still lists every record; there is no `account_id` filter and no cross-account authorization model beyond resolving the owning account.
+
+### 7.12 AI Model Runtime Status (AI-M5.x track)
+
+**Status: foundations only. Nothing in this section produces AI task output in a default installation.**
+
+Milestone numbering: the AI model-runtime work uses its own `AI-M4.x` / `AI-M5.x` numbering (for example AI-M5.7 research, AI-M5.8.1 pack architecture). This is **not** roadmap Milestone 5, which covers additional cloud providers (OneDrive, Dropbox, Box, MEGA) and is still planned.
+
+Four distinct questions must be answered separately for any AI capability; "registered" does not imply "executable", and "executable" does not imply "end-to-end functional":
+
+| Capability | Registered | Available | Executable | End-to-end functional |
+|---|---|---|---|---|
+| `image_description` (Florence-2) | Yes — descriptor registered and the vision runtime is initialized during AI bootstrap | Only when optional `torch`/`transformers` packages and model weights are installed | Only in that case; `Florence2Runtime` is implemented and mock-tested | No — not verified with real weights, and nothing in the repository ships them |
+| OCR | Adapter and runtime classes exist (`ocr_runtime.py`, `tesseract_ocr_adapter.py`) | Only with an external Tesseract install plus language data | Not wired — no bootstrap or processor registration path uses them | No |
+| `text_classification` | Yes | Only with a configured local model | Only in that case | No |
+| AI pack installation | `PackManager` discovery/recommendation/approval objects only | Yes, in memory | No download, checksum verification or installation is implemented | No |
+
+- **Processor gating:** `build_task_processors` registers a processor only for capabilities `can_execute_capability(...)` reports as executable, so with no model and no compatible runtime the mapping is empty and tasks stay `PENDING` instead of being claimed and failed.
+- **Florence-2 limitations:** the runtime hardcodes the `<DETAILED_CAPTION>` task. OCR and object detection are model-supported but not exposed through SiloVault, and `confidence` is intentionally `None` rather than a fabricated score.
+- **Offline scope:** `local_files_only=True` restricts only the Hugging Face `from_pretrained()` load; it does not make the whole application offline.
+- **Test evidence:** the vision, OCR and pack-manager suites are mocked integration-contract tests. They exercise code paths without real weights and do not validate inference quality, latency or RAM use.

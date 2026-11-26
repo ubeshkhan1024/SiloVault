@@ -1,0 +1,13 @@
+SiloVault M5.2 — Step 4 Complete
+
+All 4 steps complete:
+- Step 2: Vision Runtime Adapter Foundation — 8/8 tests pass
+- Step 3: Florence-2 Runtime Implementation — 8/8 tests pass
+- Step 4: Catalogue & Application Integration — 11/11 tests pass
+- Full SiloVault suite: 1,224 passed, 3 skipped (unchanged baseline)
+
+Modified files:
+1. backend/ai/catalogue.py — Added MODEL_CATALOGUE entry for microsoft.florence-2-base with verified metadata only (name, version, modalities, model_id, compatible_runtimes). No invented checksums, sizes, or download URLs.
+2. tests/test_m52_step4_integration.py — 11 focused tests covering catalogue registration, bootstrap/runtime registration, missing model/dependency behavior, task routing, initialization failure, existing AI task compatibility, and M5.1 recovery regression.
+
+No regressions. No existing files modified outside backend/ai/. No package installations or weight downloads.

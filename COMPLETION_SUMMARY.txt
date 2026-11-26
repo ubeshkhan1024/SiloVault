@@ -1,0 +1,31 @@
+SiloVault M5.2 — Steps 2 & 3 Complete
+
+All tests passing:
+- M5.2 vision runtime adapter tests: 8/8 passed
+- Regression suite: 80/80 passed (M5.1 recovery/journal/directory_import/M4.3 installation + M5.2 tests)
+- Full SiloVault test suite: 1,224 passed, 3 skipped (baseline unchanged)
+
+Modified/Created Files:
+1. backend/ai/florence2_runtime.py (NEW) — Concrete Florence2Runtime implementing VisionRuntime protocol
+   - Dependency-injected model loading/unloading/inference callables
+   - CPU-first execution (SDPA attention, no FlashAttention)
+   - Manifest validation against installed installation.json
+   - Structured error propagation
+   - get_florence2_execution_service() bridge for AiExecutionService integration
+
+2. tests/test_m52_vision_runtime.py (NEW) — 8 focused tests
+
+Key Architecture:
+- Protocol-based runtime implementing VisionRuntime from backend/ai/vision_runtime.py
+- Dependency injection keeps tests package-free
+- CPU-first: SDPA attention; no GPU/NPU code
+- Manifest validation reuses existing _validate_v2_manifest
+- No architectural redesign: ModelManager, ModelRegistry, ModelStorage, AiExecutionService, VisionRuntimeManager all untouched
+
+Remaining Path to Florence-2 Inference:
+1. Install torch, transformers, huggingface_hub (CPU wheels) with explicit approval
+2. Add verified ModelDescriptor for microsoft.florence-2-base to catalogue
+3. Integrate Florence2Runtime into AiModelServices / AiExecutionService
+4. Add real-weights integration tests
+
+No package installations, no weight downloads, no GPU/NPU, no cloud fallback, no Git operations, no original file modifications were performed.

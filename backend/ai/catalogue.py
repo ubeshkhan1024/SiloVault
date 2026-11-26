@@ -1,24 +1,29 @@
-"""Trusted, code-controlled model catalogue for SiloVault.
-
-Descriptors here are written in code and reviewed like source.  They are never
-derived from HTTP/client input, and no download, network, or installation
-behaviour belongs in this module.
-
-The catalogue ships empty on purpose: no model URL, checksum, size, or licence
-has been independently verified yet, and inventing metadata would be unsafe.
-Entries are added only when their metadata is genuinely established.
-"""
-
 from __future__ import annotations
 
 from typing import Iterable, List, Optional, Tuple
-from urllib.parse import urlparse
 
 from backend.ai.interfaces import ModelDescriptor, ModelRegistry, ModelValidationError
 
-#: Static descriptors controlled by the source tree.  Empty until verified
-#: model metadata is available.
-MODEL_CATALOGUE: Tuple[ModelDescriptor, ...] = ()
+# Trusted, code-controlled model catalogue for SiloVault.
+
+# Descriptors here are written in code and reviewed like source.  They are never
+# derived from HTTP/client input, and no download, network, or installation
+# behaviour belongs in this module.
+
+# The catalogue ships empty on purpose: no model URL, checksum, size, or licence
+# has been independently verified yet, and inventing metadata would be unsafe.
+# Entries are added only when their metadata is genuinely established.
+#
+# Currently registered one entry for Microsoft's Florence-2-base vision model.
+MODEL_CATALOGUE: Tuple[ModelDescriptor, ...] = (
+    ModelDescriptor(
+        name="Florence-2 Base",
+        version="1.0",
+        modalities=("vision",),
+        model_id="microsoft.florence-2-base",
+        compatible_runtimes=("florence2-cpu",),
+    ),
+)
 
 # Algorithms the installation service can verify.  Kept in sync with
 # ``backend.ai.installation``; only these may appear on installable entries.
@@ -64,11 +69,17 @@ def register_catalogue(
 
 
 def _validate_installable_metadata(descriptor: ModelDescriptor) -> None:
-    """Enforce catalogue policy for entries that declare a download source."""
+    """Enforce catalogue policy for entries that declare a download source.
+
+    Since the default ``MODEL_CATALOGUE`` entry does not declare a
+    ``download_url``, this guard is a no-op for the shipped descriptor.
+    """
     if descriptor.download_url is None:
         return
 
-    parsed = urlparse(descriptor.download_url)
+    import urllib.parse as urlparse
+
+    parsed = urlparse.urlparse(descriptor.download_url)
     if parsed.scheme.lower() != "https" or not parsed.netloc:
         raise ModelValidationError(
             "installable catalogue models require an absolute https download_url"

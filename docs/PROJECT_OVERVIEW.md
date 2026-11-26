@@ -91,16 +91,17 @@ possibilities, but none are planned yet.
 
 ## 7. Current status
 
-The project has progressed beyond its initial skeleton. The current implementation includes a FastAPI backend, PWA frontend, SQLite persistence managed by Alembic, unified file metadata, local storage, a provider adapter registry, and Google Drive integration foundations.
+The project has progressed beyond its initial skeleton. The current implementation includes a FastAPI backend, PWA frontend, SQLite persistence managed by Alembic, unified file metadata, local storage, a provider adapter registry, Google Drive integration foundations, and a storage-account management API with per-account credential references and cross-account isolation.
 
 ### Implemented foundations
 - **Local storage:** file upload, listing, detail, download, rename, logical move, quarantine-based deletion, and activity history.
 - **Unified storage:** common storage-operation contract, provider capability definitions, registry-based dispatch, and normalized storage errors.
-- **Google Drive:** installed-app OAuth with PKCE/loopback callback, OS-keyring refresh-token storage, startup restoration, dedicated SiloVault root-folder management, and adapter operations.
+- **Google Drive:** installed-app OAuth with PKCE/loopback callback, OS-keyring refresh-token storage, startup restoration, dedicated SiloVault root-folder management, adapter operations, and account-scoped OAuth for managed storage accounts.
+- **Storage accounts (HVSA H1.5):** list, detail, create, and partial-update APIs; server-generated credential references; per-account adapter caching with scoped invalidation; status-independent CRUD; and a migration-owned partial unique index on normalized credential references (Alembic head `b7c4e1a92f30`). There is no account deletion endpoint and no account-management UI. Account-scoped file operations (download, rename, logical move, delete/quarantine/restore, recovery and upload) are implemented: each record resolves its own storage account, legacy records keep the provider-registry behavior, and a managed-account failure never falls back.
 - **Deletion recovery:** persistent pending-deletion records, original metadata snapshots, claim tokens, leases, retry scheduling, and recovery handling.
-- **AI foundation:** M4.0 architecture planning is complete; M4.1 database/API foundation work has started, with Stage 1B.1 completed. This does not mean the full OCR/classification/organization pipeline is operational.
+- **AI foundation:** M4.0 architecture planning is complete. M4.1 (AI task lifecycle, worker processing, proposal storage, backend approval/rejection) and M4.4 (worker lease heartbeat, expired-lease recovery, processor registration, lifespan integration) are implemented and tested. The AI model-runtime track (AI-M5.x) adds a Florence-2 vision runtime foundation and an OCR adapter foundation; the latter is not wired into task processing. None of this makes the OCR/classification/organization pipeline operational — no AI capability is end-to-end functional, and real inference needs optional packages and model weights that are not bundled.
 
 ### Current verification snapshot
-The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. Google Drive automated tests use mocks; manual provider checks should be distinguished from full production readiness. The generic file DELETE endpoint still has provider limitations documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+The latest full automated test run (26 November 2026) reported **1792 passed, 3 skipped, 0 failed, 1 warning**. The single warning is the Starlette/FastAPI deprecation for `HTTP_422_UNPROCESSABLE_ENTITY` (replacement: `HTTP_422_UNPROCESSABLE_CONTENT`). Google Drive automated tests use mocks; manual provider checks should be distinguished from full production readiness. Mocked coverage is not live-provider verification. The generic file DELETE endpoint still has provider limitations documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 See [ROADMAP.md](ROADMAP.md) for milestone status and remaining work.

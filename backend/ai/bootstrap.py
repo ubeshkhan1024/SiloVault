@@ -19,8 +19,10 @@ from typing import Optional
 from fastapi import HTTPException, Request, status
 
 from backend.ai.catalogue import register_catalogue
-from backend.ai.interfaces import ModelManager, ModelRegistry
+from backend.ai.florence2_runtime import Florence2InferenceAdapter, Florence2Runtime
+from backend.ai.interfaces import ModelManager, ModelRegistry, Profile
 from backend.ai.storage import ModelStorage
+from backend.ai.vision_runtime import VisionRuntimeManager
 from backend.config import Settings, settings as default_settings
 
 
@@ -39,6 +41,97 @@ class AiModelServices:
     storage: ModelStorage
     registry: ModelRegistry
     manager: ModelManager
+    vision_runtime_manager: Optional[VisionRuntimeManager] = None
+
+    def shutdown(self) -> None:
+        """Shut down the vision runtime if initialized.
+
+        Idempotent: safe to call multiple times.
+        """
+        if self.vision_runtime_manager is not None:
+            try:
+                self.vision_runtime_manager.shutdown()
+            except Exception:
+                pass  # Best effort; log if needed
+
+
+def _initialize_vision_runtime(manager: ModelManager) -> tuple[Optional[Florence2InferenceAdapter], Optional[VisionRuntimeManager]]:
+    """Initialize and register the Florence-2 vision runtime.
+
+    Returns a tuple of (adapter, vision_runtime_manager) if initialization succeeds,
+    (None, None) if the runtime cannot be initialized (e.g., missing ML dependencies).
+    This allows the application to start without vision capabilities while preserving
+    text-processing functionality.
+
+    The VisionRuntimeManager reuses the runtime registered in ModelManager to ensure
+    a single authoritative runtime instance.
+    """
+    # Create VisionRuntimeManager first so it can reuse any pre-registered runtime
+    vision_manager = VisionRuntimeManager(manager)
+
+    try:
+        runtime = Florence2Runtime()
+        runtime.initialize()
+    except Exception as exc:
+        # Missing torch/transformers or other initialization failure.
+        # Log and return None so the application can continue without vision.
+        import logging
+        logging.getLogger(__name__).warning(
+            "Florence-2 runtime unavailable (text processing still works): %s", exc
+        )
+        return None, None
+
+    # Wrap with adapter to implement InferenceRuntime + ImageDescriptionRuntime
+    adapter = Florence2InferenceAdapter(runtime)
+
+    # Register the runtime with the ModelManager
+    try:
+        manager.register_runtime(adapter)
+    except ValueError:
+        # Already registered (idempotent)
+        pass
+
+    # Associate the runtime with the Florence-2 model descriptor
+    model_id = "microsoft.florence-2-base"
+    if manager.model_registry.is_registered(model_id):
+        try:
+            manager.associate_runtime_with_model(adapter.name, model_id)
+        except KeyError:
+            # Runtime or model not registered - this is fine, capability will be unavailable
+            pass
+
+    # Initialize the VisionRuntimeManager with the already-registered runtime.
+    # Since the adapter implements VisionRuntime protocol, we can use it directly.
+    # The VisionRuntimeManager will detect it's already initialized and reuse it.
+    try:
+        # Use a dummy runtime class that returns the already-initialized adapter
+        # This avoids creating a second Florence2Runtime instance
+        class _PreInitializedRuntime:
+            def __init__(self, adapter: Florence2InferenceAdapter):
+                self._adapter = adapter
+
+            def __call__(self):
+                return self._adapter
+
+        vision_manager.initialize_runtime(_PreInitializedRuntime(adapter))
+    except Exception as exc:
+        # If VisionRuntimeManager initialization fails, clean up the runtime
+        # and its registration to avoid leaving an unmanaged initialized runtime.
+        import logging
+        logging.getLogger(__name__).warning(
+            "VisionRuntimeManager initialization failed, cleaning up: %s", exc
+        )
+        try:
+            runtime.shutdown()
+        except Exception:
+            pass
+        try:
+            manager.unregister_runtime(adapter.name)
+        except Exception:
+            pass
+        return None, None
+
+    return adapter, vision_manager
 
 
 def build_ai_model_services(
@@ -64,7 +157,18 @@ def build_ai_model_services(
     manager = ModelManager(model_registry=registry)
     # Trusted, code-controlled entries only; the catalogue is currently empty.
     register_catalogue(registry)
-    return AiModelServices(storage=storage, registry=registry, manager=manager)
+
+    # Register Florence-2 image_description capability for BALANCED profile.
+    # This makes the model discoverable via ModelManager.get_capability_descriptor()
+    # and enables can_execute_capability() to find the runtime.
+    florence2_descriptor = registry.find("microsoft.florence-2-base")
+    if florence2_descriptor is not None:
+        manager.register_capability("image_description", florence2_descriptor, profile=Profile.BALANCED)
+
+    # Initialize and register the vision runtime (non-blocking, optional)
+    adapter, vision_manager = _initialize_vision_runtime(manager)
+
+    return AiModelServices(storage=storage, registry=registry, manager=manager, vision_runtime_manager=vision_manager)
 
 
 def configure_ai_model_services(

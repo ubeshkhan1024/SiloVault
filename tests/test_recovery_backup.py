@@ -141,7 +141,10 @@ def _seed_pending(
     try:
         pd = PendingDeletion(
             provider=provider,
-            provider_account_id=None if provider == "LOCAL" else "acc-1",
+            # NULL keeps these provider-level (registry) scenarios legacy;
+            # account-scoped recovery is covered by
+            # ``tests/test_file_account_recovery.py``.
+            provider_account_id=None,
             provider_file_id=provider_file_id,
             quarantine_id=quarantine_id,
             file_name_snapshot=file_name,

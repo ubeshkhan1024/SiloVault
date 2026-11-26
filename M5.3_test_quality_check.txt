@@ -1,0 +1,15 @@
+Current test file analysis:
+- 9 test functions exist (no inference-level tests)
+- Key terms (_do_execute, model.generate, post_process_generation, etc.) found 0 times
+- Need to add behavioral tests that exercise Florence2Runtime._do_execute() with mocked dependencies
+
+The task requires:
+1. Tests that invoke the real _do_execute() method with mocks
+2. Processor records received image and task prompt
+3. model.generate() called with input_ids and pixel_values
+4. processor.batch_decode() called
+5. processor.post_process_generation() called with task and (width, height)
+6. description, tags, confidence=None checked
+7. Invalid image and generation failure cases tested
+
+I need to add these tests to test_m52_vision_runtime.py using dependency injection/controlled module mocks, independent of torch/transformers/Downloaded weights.

@@ -6,9 +6,9 @@ AI processing pipelines, and failure handling across **SiloVault's unified multi
 For overall scope and definitions, see [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md). For system topology, see [ARCHITECTURE.md](ARCHITECTURE.md). For safety rules, see [AGENTS.md](../AGENTS.md).
 
 > [!IMPORTANT]
-> **Status (20 November 2026):** This document describes the intended end-to-end lifecycle, but several flows remain planned. Implemented foundations include local upload/download and metadata handling, provider adapter abstractions, Google Drive OAuth and adapter operations, activity history, quarantine-based deletion, and persistent deletion-recovery processing. The complete cross-provider intake/synchronization worker, mobile offline upload workflow, full AI processing pipeline, approval workflow, and general user-facing restore experience are not complete.
+> **Status (25 November 2026):** This document describes the intended end-to-end lifecycle, but several flows remain planned. Implemented foundations include local upload/download and metadata handling, provider adapter abstractions, Google Drive OAuth and adapter operations, account-scoped OAuth for managed storage accounts, the storage-account management API (list, detail, create, partial update), activity history, quarantine-based deletion, and persistent deletion-recovery processing. Business file flows are account-aware: a record that names a storage account resolves exactly that account, while a legacy record (`provider_account_id` `NULL`) keeps the provider-registry behavior (§3.7). The complete cross-provider intake/synchronization worker, mobile offline upload workflow, full AI processing pipeline, approval workflow, and general user-facing restore experience are not complete.
 >
-> The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. Treat the diagrams below as target architecture unless a subsection explicitly identifies implemented behavior. Consult `ARCHITECTURE.md` for current provider/API limitations.
+> The latest full automated test run (26 November 2026, excluding the preserved duplicate module `tests/test_m52_vision_runtime_new.py`) reported **1792 passed, 3 skipped, 0 failed, 1 warning**. The single warning is a Starlette/FastAPI deprecation notice for `HTTP_422_UNPROCESSABLE_ENTITY`, whose replacement is `HTTP_422_UNPROCESSABLE_CONTENT`. Treat the diagrams below as target architecture unless a subsection explicitly identifies implemented behavior. Consult `ARCHITECTURE.md` for current provider/API limitations.
 
 ---
 
@@ -149,6 +149,22 @@ The local sync engine coordinates polling across all connected provider adapters
   - **File Binaries:** Remain stored across cloud storage providers (Google Drive, OneDrive, Dropbox, Box, MEGA).
   - **Unified Metadata:** Maintained in local SQLite and synchronized with the Cloud Control Plane (Supabase).
 * **Sync Coordination:** The Cloud Control Plane coordinates cross-device metadata without ever transmitting or storing raw file binaries.
+
+### 3.7 Account-Scoped File Operation Routing (Implemented — HVSA H1.5.4)
+
+The lifecycle above is provider-oriented. Within the implemented backend, each file record also carries an optional `provider_account_id`, and every file operation resolves its adapter from that record through `resolve_file_adapter()`:
+
+1. **Legacy record (`provider_account_id` is `NULL`).** The provider registry is consulted (`lookup(record.provider)`), which is the pre-H1.5.4 behavior for LOCAL and the single legacy Google Drive connection.
+2. **Managed record (`provider_account_id` is set).** Exactly that `StorageAccount` is resolved through `AccountAdapterManager`, which loads the account's own scoped credentials and returns an adapter only for a `connected` account whose authentication succeeds.
+3. **Failure.** An unknown account (`404`), a provider mismatch (`409`) or an unavailable account (`503`) ends the request. There is no fallback to the registry, so a file is never read, renamed, moved, deleted or restored through another account or through the legacy provider connection.
+
+Ownership travels with the work:
+
+- **Upload** (`POST /api/v1/uploads?account_id=...`) resolves that account, uploads through it, and stores the ID on the new record. Omitting `account_id` keeps a legacy provider-level upload.
+- **Delete** copies the record's `provider_account_id` into the durable `PendingDeletion` row (both CLEANUP and any RESTORE row created by a failed rollback), so the same account performs quarantine, restoration and cleanup.
+- **Recovery** resolves each claimed `PendingDeletion` through the same helper. A resolution failure is a transient retry, never a completed cleanup.
+
+LOCAL rename and move remain metadata-only, and Google Drive move remains a SiloVault-logical operation that does not change the Drive parent folder. The application imposes no limit on how many storage accounts exist.
 
 ---
 

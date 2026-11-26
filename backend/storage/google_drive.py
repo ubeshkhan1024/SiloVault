@@ -110,8 +110,15 @@ class GoogleDriveAdapter(StorageOperations, StorageLifecycle):
     folder management. File operations are stubs pending later M3.2 phases.
     """
 
-    def __init__(self, credentials: Optional[ga_credentials.Credentials] = None) -> None:
+    def __init__(
+        self,
+        credentials: Optional[ga_credentials.Credentials] = None,
+        credentials_ref: Optional[str] = None,
+    ) -> None:
         self._credentials = credentials
+        #: Account-scoped credential reference (HVSA H1.4C). ``None`` keeps the
+        #: legacy single-account keyring entry (``"google-drive"``).
+        self._credentials_ref = credentials_ref
         self._drive_service = None
         # Root folder state (M3.2 Phase B1.1)
         self._root_folder_id: Optional[str] = None
@@ -243,9 +250,10 @@ class GoogleDriveAdapter(StorageOperations, StorageLifecycle):
                 )
 
             # 1. Load persisted ID from keyring (backward compatible: M3.1
-            #    records have an empty root_folder_id).
+            #    records have an empty root_folder_id). Account-scoped adapters
+            #    read only their own keyring entry.
             try:
-                stored = load_google_drive_credentials()
+                stored = load_google_drive_credentials(**self._credentials_kwargs())
             except CredentialStorageError as exc:
                 # Keyring read failure must fail safely: raise so the caller
                 # knows the durable state is unknown. Existing stored
@@ -337,13 +345,13 @@ class GoogleDriveAdapter(StorageOperations, StorageLifecycle):
         :meth:`get_root_folder_id` call retries the write.
         """
         try:
-            stored = load_google_drive_credentials()
+            stored = load_google_drive_credentials(**self._credentials_kwargs())
             if stored is None:
                 raise CredentialStorageError(
                     "No stored credentials to attach the root folder ID to"
                 )
             updated = stored.with_root_folder_id(folder_id)
-            store_google_drive_credentials(updated)
+            store_google_drive_credentials(updated, **self._credentials_kwargs())
             self._root_folder_persistence_pending = False
             logger.info("Root folder ID persisted to credential store")
         except (CredentialStorageError, ValueError, TypeError) as exc:
@@ -357,6 +365,16 @@ class GoogleDriveAdapter(StorageOperations, StorageLifecycle):
                 folder_id,
                 exc,
             )
+
+    def _credentials_kwargs(self) -> dict[str, str]:
+        """Keyword arguments selecting this adapter's credential entry.
+
+        Returns an empty mapping for legacy (no-reference) adapters so that
+        the no-argument keyring helpers are called exactly as before.
+        """
+        if self._credentials_ref is None:
+            return {}
+        return {"credentials_ref": self._credentials_ref}
 
     def _retry_root_folder_persistence(self) -> None:
         """Retry a previously failed root-folder persistence (no-op when

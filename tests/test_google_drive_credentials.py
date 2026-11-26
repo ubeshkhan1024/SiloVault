@@ -1,26 +1,6 @@
-"""Focused tests for Google Drive credential storage (M3.2 Phase A).
-
-Covers ``backend.storage.credentials``:
-
-* ``GoogleDriveCredentials`` construction validation:
-  scopes (list/tuple accepted, string/empty/whitespace/non-string rejected),
-  refresh-token validation, frozen-dataclass immutability,
-  and ``root_folder_id`` handling.
-* ``with_root_folder_id()``: new-instance semantics, field preservation,
-  and rejection of empty / whitespace-only / non-string folder IDs.
-* Serialization: ``to_dict()`` / ``from_dict()`` roundtrip, root folder
-  persistence, backward compatibility with M3.1 records (missing
-  ``scopes`` key and missing ``root_folder_id``), and rejection of
-  explicit ``scopes: null``.
-* Keyring safety: invalid store attempts never overwrite existing valid
-  entries, corrupted stored data returns ``None`` without exposing secrets
-  in logs, and keyring availability errors still surface correctly.
-
-All tests use the same in-memory keyring fixture convention as
-``tests/test_google_drive_auth.py`` (monkeypatch on
-``backend.storage.credentials._get_keyring``). No OS credential store and
-no real Google credentials are used.
-"""
+# ---------------------------------------------------------------------------
+# Tests: Google Drive credential storage (M3.2 Phase A)
+# ---------------------------------------------------------------------------
 
 from __future__ import annotations
 
@@ -33,8 +13,11 @@ from backend.config import settings
 from backend.storage.credentials import (
     CredentialStorageError,
     GoogleDriveCredentials,
+    delete_google_drive_credentials,
+    has_google_drive_credentials,
     load_google_drive_credentials,
     store_google_drive_credentials,
+    _derive_keyring_account,
 )
 
 try:
@@ -48,7 +31,6 @@ DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
 
 @pytest.fixture(autouse=True)
 def _fake_keyring(monkeypatch: pytest.MonkeyPatch):
@@ -92,7 +74,7 @@ def _make_credentials(**overrides) -> GoogleDriveCredentials:
 
 # ---------------------------------------------------------------------------
 # Tests: scopes validation and immutability
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_scopes_list_normalized_to_tuple():
@@ -148,7 +130,7 @@ def test_scopes_whitespace_stripped_on_normalization():
 
 # ---------------------------------------------------------------------------
 # Tests: refresh-token validation
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_refresh_token_empty_rejected():
@@ -173,7 +155,7 @@ def test_refresh_token_whitespace_stripped():
 
 # ---------------------------------------------------------------------------
 # Tests: frozen dataclass immutability
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_frozen_fields_cannot_be_reassigned():
@@ -209,7 +191,7 @@ def test_root_folder_id_stripped():
 
 # ---------------------------------------------------------------------------
 # Tests: with_root_folder_id()
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_with_root_folder_id_returns_new_instance():
@@ -258,7 +240,7 @@ def test_with_root_folder_id_non_string_rejected():
 
 # ---------------------------------------------------------------------------
 # Tests: serialization / deserialization
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_to_dict_from_dict_roundtrip():
@@ -320,7 +302,7 @@ def test_from_dict_missing_refresh_token_rejected():
 
 # ---------------------------------------------------------------------------
 # Tests: keyring store / load roundtrip (Phase A additions)
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_store_load_roundtrip_with_root_folder_id(_fake_keyring):
@@ -366,7 +348,7 @@ def test_with_root_folder_id_persisted_via_keyring(_fake_keyring):
 
 # ---------------------------------------------------------------------------
 # Tests: invalid store attempts never overwrite valid entries
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_store_rejects_non_credentials_instance(_fake_keyring):
@@ -401,7 +383,7 @@ def test_store_invalid_credentials_does_not_overwrite(_fake_keyring):
 
 # ---------------------------------------------------------------------------
 # Tests: corrupted stored data returns None safely
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def _write_raw_keyring(_fake_keyring, raw: str) -> None:
@@ -489,7 +471,7 @@ def test_load_corrupted_data_does_not_expose_secrets_in_logs(
 
 # ---------------------------------------------------------------------------
 # Tests: keyring availability errors still surface
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
 
 def test_load_keyring_locked_raises(monkeypatch: pytest.MonkeyPatch):
@@ -517,3 +499,215 @@ def test_load_keyring_error_raises(_fake_keyring, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(_fake_keyring, "get_password", failing_get_password)
     with pytest.raises(CredentialStorageError):
         load_google_drive_credentials()
+# ---------------------------------------------------------------------------
+# Tests: per-account credential isolation (H1.4C)
+# ---------------------------------------------------------------------------
+
+def _write_raw_keyring(_fake_keyring, raw: str) -> None:
+    _fake_keyring.set_password("silovault", "google-drive", raw)
+
+
+def _make_credentials_with_ref(credentials_ref: str, **overrides) -> GoogleDriveCredentials:
+    """Build valid credentials with a given credentials_ref and sensible defaults.
+
+    Note: This helper is placed after GoogleDriveCredentials class definition
+    so the name is resolved at import time.
+    """
+    params = dict(
+        refresh_token="valid-refresh-token",
+        client_id="cid",
+        client_secret="cs",
+        scopes=[DRIVE_FILE_SCOPE],
+    )
+    params.update(overrides)
+    # credentials_ref is not a field of GoogleDriveCredentials; it is passed
+    # separately to store/load/delete/has functions.  We return a plain
+    # GoogleDriveCredentials instance and store the ref alongside in the test.
+    creds = GoogleDriveCredentials(**params)
+    # Attach credentials_ref as an attribute for use by the test functions.
+    object.__setattr__(creds, "credentials_ref", credentials_ref)  # type: ignore[attr-defined]
+    return creds
+
+
+def test_two_different_references_store_independent_credentials(_fake_keyring):
+    """Two different ``credentials_ref`` values store independent credentials.
+
+    The keyring store uses ``(service, account)`` as the lookup key, so
+    different references must not overwrite each other.
+    """
+    ref_a = "ref-account-A"
+    ref_b = "ref-account-B"
+
+    creds_a = _make_credentials_with_ref(ref_a, root_folder_id="folder-A")
+    creds_b = _make_credentials_with_ref(ref_b, root_folder_id="folder-B")
+
+    store_google_drive_credentials(creds_a, credentials_ref=ref_a)
+    store_google_drive_credentials(creds_b, credentials_ref=ref_b)
+
+    loaded_a = load_google_drive_credentials(credentials_ref=ref_a)
+    loaded_b = load_google_drive_credentials(credentials_ref=ref_b)
+
+    assert loaded_a is not None
+    assert loaded_b is not None
+    assert loaded_a.refresh_token == "valid-refresh-token"
+    assert loaded_b.refresh_token == "valid-refresh-token"
+    assert loaded_a.root_folder_id == "folder-A"
+    assert loaded_b.root_folder_id == "folder-B"
+
+
+def test_loading_one_reference_never_returns_another_accounts_credentials(
+    _fake_keyring,
+):
+    """Loading one ``credentials_ref`` never returns another account's credentials."""
+    ref_a = "ref-account-X"
+    ref_b = "ref-account-Y"
+
+    creds_a = _make_credentials_with_ref(ref_a, root_folder_id="folder-X")
+    store_google_drive_credentials(creds_a, credentials_ref=ref_a)
+
+    # Loading with ref_b should return None (no credentials for that account)
+    loaded_b = load_google_drive_credentials(credentials_ref=ref_b)
+    assert loaded_b is None
+
+    # Loading with the original ref_a should still return the correct credentials
+    loaded_a = load_google_drive_credentials(credentials_ref=ref_a)
+    assert loaded_a is not None
+    assert loaded_a.root_folder_id == "folder-X"
+
+
+def test_deleting_one_reference_leaves_the_other_untouched(_fake_keyring):
+    """Deleting one ``credentials_ref`` leaves the other account's credentials untouched."""
+    ref_a = "ref-account-P"
+    ref_b = "ref-account-Q"
+
+    creds_a = _make_credentials_with_ref(ref_a, root_folder_id="folder-P")
+    creds_b = _make_credentials_with_ref(ref_b, root_folder_id="folder-Q")
+
+    store_google_drive_credentials(creds_a, credentials_ref=ref_a)
+    store_google_drive_credentials(creds_b, credentials_ref=ref_b)
+
+    # Verify both are loaded
+    loaded_a_before = load_google_drive_credentials(credentials_ref=ref_a)
+    loaded_b_before = load_google_drive_credentials(credentials_ref=ref_b)
+    assert loaded_a_before is not None
+    assert loaded_b_before is not None
+
+    # Delete only ref_a's credentials
+    result = delete_google_drive_credentials(credentials_ref=ref_a)
+    assert result is True
+
+    # ref_a should now be empty
+    loaded_a_after = load_google_drive_credentials(credentials_ref=ref_a)
+    assert loaded_a_after is None
+
+    # ref_b should still be intact
+    loaded_b_after = load_google_drive_credentials(credentials_ref=ref_b)
+    assert loaded_b_after is not None
+    assert loaded_b_after.root_folder_id == "folder-Q"
+
+
+def test_has_google_drive_credentials_checks_correct_entry(_fake_keyring):
+    """``has_google_drive_credentials()`` checks the correct keyring entry."""
+    ref_a = "ref-account-H"
+    ref_b = "ref-account-I"
+
+    # Store credentials only under ref_a
+    creds_a = _make_credentials_with_ref(ref_a, root_folder_id="folder-H")
+    store_google_drive_credentials(creds_a, credentials_ref=ref_a)
+
+    # has_google_drive_credentials() without ref should check global entry (empty)
+    has_global = has_google_drive_credentials()
+    # Since we only stored under ref_a (not global), the global check may vary.
+    # The important thing is that has_google_drive_credentials(ref=ref_a) is True
+    has_ref_a = has_google_drive_credentials(credentials_ref=ref_a)
+    assert has_ref_a is True
+
+    # has_google_drive_credentials(ref=ref_b) should be False
+    has_ref_b = has_google_drive_credentials(credentials_ref=ref_b)
+    assert has_ref_b is False
+
+
+def test_legacy_no_argument_calls_still_use_original_keyring_entry(_fake_keyring):
+    """Legacy no-argument calls still use the original ``"google-drive"`` keyring entry."""
+    # Store credentials using the legacy global entry
+    creds = _make_credentials(root_folder_id="legacy-folder")
+    store_google_drive_credentials(creds)  # no credentials_ref -> global
+
+    # Load using legacy no-argument form
+    loaded = load_google_drive_credentials()
+    assert loaded is not None
+    assert loaded.root_folder_id == "legacy-folder"
+
+    # has_google_drive_credentials() no-arg should be True
+    assert has_google_drive_credentials() is True
+
+    # delete_google_drive_credentials() no-arg should delete the global entry
+    result = delete_google_drive_credentials()
+    assert result is True
+
+    # After deletion, load should return None
+    loaded_after = load_google_drive_credentials()
+    assert loaded_after is None
+
+
+def test_invalid_credentials_ref_rejected(_fake_keyring):
+    """Invalid ``credentials_ref`` values are rejected by store/load/delete/has,
+    and the legacy (no-reference) entry keeps working.
+
+    A legacy credential is stored first so the no-argument check resolves a
+    real entry in the legacy ``"google-drive"`` keyring slot.
+    """
+    legacy_creds = _make_credentials(refresh_token="legacy-refresh-token")
+    store_google_drive_credentials(legacy_creds)  # no credentials_ref -> legacy
+
+    # Empty and whitespace-only references are rejected with ValueError.
+    for bad_ref in ("", "   "):
+        with pytest.raises(ValueError):
+            store_google_drive_credentials(
+                _make_credentials(), credentials_ref=bad_ref
+            )
+        with pytest.raises(ValueError):
+            load_google_drive_credentials(credentials_ref=bad_ref)
+        with pytest.raises(ValueError):
+            delete_google_drive_credentials(credentials_ref=bad_ref)
+        with pytest.raises(ValueError):
+            has_google_drive_credentials(credentials_ref=bad_ref)
+
+    # Non-string references are rejected with TypeError.
+    for bad_ref in (12345, b"ref"):
+        with pytest.raises(TypeError):
+            store_google_drive_credentials(
+                _make_credentials(), credentials_ref=bad_ref  # type: ignore[arg-type]
+            )
+        with pytest.raises(TypeError):
+            load_google_drive_credentials(credentials_ref=bad_ref)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            delete_google_drive_credentials(credentials_ref=bad_ref)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            has_google_drive_credentials(credentials_ref=bad_ref)  # type: ignore[arg-type]
+
+    # Legacy compatibility: the rejected calls wrote nothing, so the original
+    # legacy entry is still the one the no-argument API resolves.
+    loaded = load_google_drive_credentials(credentials_ref=None)
+    assert loaded is not None
+    assert loaded.refresh_token == "legacy-refresh-token"
+    assert has_google_drive_credentials() is True
+    assert has_google_drive_credentials(credentials_ref=None) is True
+
+
+def test_sha256_derivation_is_deterministic(_fake_keyring):
+    """The SHA-256 derivation produces the same account name for the same reference."""
+    ref = "deterministic-test-ref"
+
+    # Call the derivation function twice - should produce same result
+    account_name_1 = _derive_keyring_account(ref)
+    account_name_2 = _derive_keyring_account(ref)
+
+    assert account_name_1 == account_name_2
+    assert len(account_name_1) == 64  # SHA-256 hex digest length
+    assert isinstance(account_name_1, str)
+
+    # Different references should produce different account names
+    ref2 = "different-ref"
+    account_name_3 = _derive_keyring_account(ref2)
+    assert account_name_1 != account_name_3

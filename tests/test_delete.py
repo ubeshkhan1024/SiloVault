@@ -17,7 +17,9 @@ from sqlalchemy.pool import StaticPool
 from backend.config import settings
 from backend.database import Base, get_db
 from backend.main import app
+from backend.models.storage_account import StorageAccount
 from backend.models.unified_file import UnifiedFileRecord
+from backend.storage.account_adapter_manager import adapter_manager
 from backend.storage.local import LocalAdapter
 from backend.storage.registry import register, remove
 from backend.storage.capabilities import CAPABILITY_MAP
@@ -99,13 +101,21 @@ def delete_env(tmp_path, monkeypatch):
     adapter = LocalAdapter(str(uploads_dir))
     register("LOCAL", adapter, CAPABILITY_MAP["LOCAL"])
 
+    # Account-aware delete resolves managed adapters through the process-wide
+    # manager. Point it at this test's database and start from a clean cache;
+    # monkeypatch restores ``_session_factory`` after the test.
+    monkeypatch.setattr(adapter_manager, "_session_factory", TestSession)
+    adapter_manager.invalidate_all()
+
     try:
         yield {
             "client": TestClient(app),
             "engine": engine,
             "uploads_dir": uploads_dir,
+            "adapter": adapter,
         }
     finally:
+        adapter_manager.invalidate_all()
         # Clean up adapter registrations (LOCAL always present; GOOGLE_DRIVE only if added by a test).
         remove("LOCAL")
         try:
@@ -414,12 +424,14 @@ def test_delete_cloud_provider_rejected(delete_env):
     client = env["client"]
     engine = env["engine"]
 
-    # Insert a GOOGLE_DRIVE record directly (no physical file needed).
+    # Insert a legacy (NULL account) GOOGLE_DRIVE record directly (no physical
+    # file needed). Account-scoped delete is covered by
+    # ``tests/test_file_account_delete.py``.
     session = sessionmaker(bind=engine)()
     try:
         record = UnifiedFileRecord(
             provider="GOOGLE_DRIVE",
-            provider_account_id="acc_1",
+            provider_account_id=None,
             provider_file_id="gdrive_abc123",
             name="cloud.pdf",
             logical_path="/cloud.pdf",
@@ -775,7 +787,6 @@ def test_delete_db_commit_fails_restore_fails(delete_env):
     import sqlalchemy.orm
     from sqlalchemy.orm import sessionmaker
     from backend.models.pending_deletion import PendingDeletion
-    from backend.storage.registry import lookup as registry_lookup
     from backend.storage.errors import StorageUnavailableError
 
     env = delete_env
@@ -786,15 +797,6 @@ def test_delete_db_commit_fails_restore_fails(delete_env):
     original_bytes = b"restore fail"
     payload = _upload(client, "restore_fail.txt", original_bytes)
     file_id = payload["id"]
-
-    def mock_lookup(provider):
-        adapter, caps = registry_lookup(provider)
-        adapter.restore = MagicMock(
-            side_effect=StorageUnavailableError(
-                "restore failed", provider="LOCAL"
-            )
-        )
-        return adapter, caps
 
     # Fail the first commit, but allow subsequent commits to execute normally.
     real_commit = sqlalchemy.orm.Session.commit
@@ -813,9 +815,10 @@ def test_delete_db_commit_fails_restore_fails(delete_env):
         sqlalchemy.orm.Session,
         "commit",
         new=fail_first_commit_then_commit,
-    ), patch(
-        "backend.api.v1.endpoints.files.lookup",
-        side_effect=mock_lookup,
+    ), patch.object(
+        env["adapter"],
+        "restore",
+        side_effect=StorageUnavailableError("restore failed", provider="LOCAL"),
     ):
         response = client.delete(f"/api/v1/files/{file_id}")
 
@@ -860,7 +863,6 @@ def test_delete_db_commit_fails_restore_fails(delete_env):
 def test_delete_commit_succeeds_cleanup_fails(delete_env):
     """DB commit succeeds; adapter.cleanup() fails.
     HTTP 204 must still be returned and the cleanup failure logged."""
-    from backend.storage.registry import lookup as registry_lookup
     from backend.storage.errors import StorageUnavailableError
 
     env = delete_env
@@ -871,12 +873,11 @@ def test_delete_commit_succeeds_cleanup_fails(delete_env):
     file_id = payload["id"]
     storage_name = payload["provider_file_id"]
 
-    def mock_lookup(provider):
-        adapter, caps = registry_lookup(provider)
-        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("cleanup failed", provider="LOCAL"))
-        return adapter, caps
-
-    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+    with patch.object(
+        env["adapter"],
+        "cleanup",
+        side_effect=StorageUnavailableError("cleanup failed", provider="LOCAL"),
+    ):
         response = client.delete(f"/api/v1/files/{file_id}")
 
     # Should still return 204 (deletion succeeded from API perspective)
@@ -935,7 +936,6 @@ def test_delete_restore_failure_logged(delete_env):
     """Restore failure must be logged."""
     import sqlalchemy.orm
     import logging
-    from backend.storage.registry import lookup as registry_lookup
     from backend.storage.errors import StorageUnavailableError
 
     env = delete_env
@@ -945,13 +945,12 @@ def test_delete_restore_failure_logged(delete_env):
     payload = _upload(client, "restore_log.txt", b"restore log test")
     file_id = payload["id"]
 
-    def mock_lookup(provider):
-        adapter, caps = registry_lookup(provider)
-        adapter.restore = MagicMock(side_effect=StorageUnavailableError("restore failed", provider="LOCAL"))
-        return adapter, caps
-
     with patch.object(sqlalchemy.orm.Session, "commit", side_effect=Exception("db commit failed")), \
-         patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup), \
+         patch.object(
+             env["adapter"],
+             "restore",
+             side_effect=StorageUnavailableError("restore failed", provider="LOCAL"),
+         ), \
          patch("backend.api.v1.endpoints.files.logging.error") as mock_log:
         response = client.delete(f"/api/v1/files/{file_id}")
 
@@ -964,7 +963,6 @@ def test_delete_restore_failure_logged(delete_env):
 
 def test_delete_cleanup_failure_logged(delete_env):
     """Cleanup failure must be logged (as warning)."""
-    from backend.storage.registry import lookup as registry_lookup
     from backend.storage.errors import StorageUnavailableError
 
     env = delete_env
@@ -974,12 +972,11 @@ def test_delete_cleanup_failure_logged(delete_env):
     payload = _upload(client, "cleanup_log.txt", b"cleanup log test")
     file_id = payload["id"]
 
-    def mock_lookup(provider):
-        adapter, caps = registry_lookup(provider)
-        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("cleanup failed", provider="LOCAL"))
-        return adapter, caps
-
-    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup), \
+    with patch.object(
+        env["adapter"],
+        "cleanup",
+        side_effect=StorageUnavailableError("cleanup failed", provider="LOCAL"),
+    ), \
          patch("backend.api.v1.endpoints.files.logging.warning") as mock_log:
         response = client.delete(f"/api/v1/files/{file_id}")
 
@@ -1060,15 +1057,30 @@ def test_delete_populates_all_pending_deletion_snapshot_fields(delete_env):
     finally:
         db.close()
 
-    # Intercept cleanup so PendingDeletion remains in DB for inspection
-    from backend.storage.registry import lookup as registry_lookup
-    from backend.storage.registry import lookup as registry_lookup
-    def mock_lookup(provider):
-        adapter, caps = registry_lookup(provider)
-        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("keep pending", provider="LOCAL"))
-        return adapter, caps
+    # The record now points at a managed LOCAL account, so the delete path
+    # must resolve that exact account. Install this test's LOCAL adapter for it.
+    db = Session()
+    try:
+        db.add(
+            StorageAccount(
+                id="test-acc-123",
+                provider_id="LOCAL",
+                display_name="Snapshot account",
+                configuration={},
+                status="connected",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+    adapter_manager.install("test-acc-123", env["adapter"])
 
-    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+    # Intercept cleanup so PendingDeletion remains in DB for inspection
+    with patch.object(
+        env["adapter"],
+        "cleanup",
+        side_effect=StorageUnavailableError("keep pending", provider="LOCAL"),
+    ):
         response = client.delete(f"/api/v1/files/{file_id}")
 
     assert response.status_code == 204
@@ -1108,13 +1120,11 @@ def test_delete_handles_empty_tags_and_none_category_correctly(delete_env):
     payload = _upload(client, "empty_tags.txt", b"empty tags")
     file_id = payload["id"]
 
-    from backend.storage.registry import lookup as registry_lookup
-    def mock_lookup(provider):
-        adapter, caps = registry_lookup(provider)
-        adapter.cleanup = MagicMock(side_effect=StorageUnavailableError("keep pending", provider="LOCAL"))
-        return adapter, caps
-
-    with patch("backend.api.v1.endpoints.files.lookup", side_effect=mock_lookup):
+    with patch.object(
+        env["adapter"],
+        "cleanup",
+        side_effect=StorageUnavailableError("keep pending", provider="LOCAL"),
+    ):
         response = client.delete(f"/api/v1/files/{file_id}")
 
     assert response.status_code == 204

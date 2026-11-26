@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -92,10 +93,17 @@ def _recover_transaction(storage_root: Path, journal: dict) -> None:
                     verification_ok = True
                     for file_info in manifest["files"]:
                         file_path = target_dir / file_info["path"]
-                        if not file_path.is_file():
+                        # Must be a regular file, never a symlink/junction
+                        # (lstat does not follow links).
+                        try:
+                            st = file_path.lstat()
+                        except OSError:
                             verification_ok = False
                             break
-                        if file_path.stat().st_size != file_info["size"] or _hash_file(file_path, "sha256") != file_info["sha256"]:
+                        if not stat.S_ISREG(st.st_mode):
+                            verification_ok = False
+                            break
+                        if st.st_size != file_info["size"] or _hash_file(file_path, "sha256") != file_info["sha256"]:
                             verification_ok = False
                             break
                     if verification_ok:

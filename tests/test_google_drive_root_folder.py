@@ -469,3 +469,174 @@ def test_disconnect_clears_root_folder_state(_fake_keyring):
     assert adapter._drive_service is None
     with pytest.raises(StorageAuthenticationError):
         adapter.get_root_folder_id()
+
+
+# ---------------------------------------------------------------------------
+# Tests: account-scoped isolation (HVSA H1.4C)
+# ---------------------------------------------------------------------------
+
+
+def _ref_account_name(credentials_ref: str) -> str:
+    """Keyring account name derived from a credential reference."""
+    from backend.storage.credentials import _get_credentials_account_name
+
+    return _get_credentials_account_name(credentials_ref)
+
+
+def _seed_scoped_credentials(credentials_ref: str, refresh_token: str) -> None:
+    store_google_drive_credentials(
+        GoogleDriveCredentials(
+            refresh_token=refresh_token,
+            client_id="cid",
+            client_secret="cs",
+            scopes=[_DRIVE_FILE_SCOPE],
+        ),
+        credentials_ref=credentials_ref,
+    )
+
+
+def _make_scoped_adapter(credentials_ref: str) -> GoogleDriveAdapter:
+    adapter = GoogleDriveAdapter(credentials_ref=credentials_ref)
+    adapter._drive_service = MagicMock()
+    return adapter
+
+
+def test_scoped_adapter_uses_its_own_persisted_root_folder(_fake_keyring):
+    """An account-scoped adapter reuses the root folder stored under its ref."""
+    store_google_drive_credentials(
+        GoogleDriveCredentials(
+            refresh_token="rt-a",
+            client_id="cid",
+            client_secret="cs",
+            scopes=[_DRIVE_FILE_SCOPE],
+            root_folder_id="folder-a",
+        ),
+        credentials_ref="acct-a",
+    )
+    adapter = _make_scoped_adapter("acct-a")
+    files_mock = adapter._drive_service.files.return_value
+
+    assert adapter.get_root_folder_id() == "folder-a"
+    files_mock.list.assert_not_called()
+    files_mock.create.assert_not_called()
+
+
+def test_scoped_adapter_ignores_legacy_entry(_fake_keyring):
+    """A scoped adapter never falls back to the legacy global credential entry."""
+    _seed_credentials(refresh_token="legacy-rt")
+    store_google_drive_credentials(
+        load_google_drive_credentials().with_root_folder_id("legacy-folder")
+    )
+    _seed_scoped_credentials("acct-a", "rt-a")
+
+    adapter = _make_scoped_adapter("acct-a")
+    files_mock = adapter._drive_service.files.return_value
+    files_mock.list.return_value.execute.return_value = {"files": []}
+    files_mock.create.return_value.execute.return_value = {"id": "folder-a"}
+
+    # Legacy root folder ID must not leak into the scoped account.
+    assert adapter.get_root_folder_id() == "folder-a"
+    files_mock.list.assert_called_once()
+
+
+def test_scoped_persistence_writes_only_its_own_entry(_fake_keyring):
+    """Root-folder persistence is written under the account's own keyring entry."""
+    _seed_credentials(refresh_token="legacy-rt")
+    _seed_scoped_credentials("acct-a", "rt-a")
+
+    adapter = _make_scoped_adapter("acct-a")
+    files_mock = adapter._drive_service.files.return_value
+    files_mock.list.return_value.execute.return_value = {"files": []}
+    files_mock.create.return_value.execute.return_value = {"id": "folder-a"}
+
+    assert adapter.get_root_folder_id() == "folder-a"
+
+    scoped_raw = json.loads(
+        _fake_keyring.get_password(_KEYRING_SERVICE, _ref_account_name("acct-a"))
+    )
+    assert scoped_raw["root_folder_id"] == "folder-a"
+    assert scoped_raw["refresh_token"] == "rt-a"
+
+    legacy_raw = json.loads(
+        _fake_keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+    )
+    assert legacy_raw["refresh_token"] == "legacy-rt"
+    assert "root_folder_id" not in legacy_raw
+
+
+def test_two_scoped_adapters_have_isolated_root_folders(_fake_keyring):
+    """Account A and Account B each resolve and persist their own root folder."""
+    store_google_drive_credentials(
+        GoogleDriveCredentials(
+            refresh_token="rt-a",
+            client_id="cid",
+            client_secret="cs",
+            scopes=[_DRIVE_FILE_SCOPE],
+            root_folder_id="folder-a",
+        ),
+        credentials_ref="acct-a",
+    )
+    store_google_drive_credentials(
+        GoogleDriveCredentials(
+            refresh_token="rt-b",
+            client_id="cid",
+            client_secret="cs",
+            scopes=[_DRIVE_FILE_SCOPE],
+            root_folder_id="folder-b",
+        ),
+        credentials_ref="acct-b",
+    )
+
+    adapter_a = _make_scoped_adapter("acct-a")
+    adapter_b = _make_scoped_adapter("acct-b")
+
+    assert adapter_a.get_root_folder_id() == "folder-a"
+    assert adapter_b.get_root_folder_id() == "folder-b"
+
+    # Cross-account isolation: neither adapter saw the other's folder.
+    adapter_a._drive_service.files.return_value.list.assert_not_called()
+    adapter_b._drive_service.files.return_value.list.assert_not_called()
+
+
+def test_scoped_adapter_without_own_credentials_does_not_create_legacy_entry(
+    _fake_keyring,
+):
+    """A scoped adapter with no stored credentials never invents a folder ID
+    and never writes the legacy (unscoped) entry."""
+    _seed_credentials(refresh_token="legacy-rt")
+    adapter = _make_scoped_adapter("acct-a")
+    files_mock = adapter._drive_service.files.return_value
+    files_mock.list.return_value.execute.return_value = {"files": []}
+    files_mock.create.return_value.execute.return_value = {"id": "folder-a"}
+
+    # Discovery still works, but persistence fails safely (no scoped record).
+    assert adapter.get_root_folder_id() == "folder-a"
+    assert adapter._root_folder_persistence_pending is True
+
+    legacy_raw = json.loads(
+        _fake_keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+    )
+    assert legacy_raw["refresh_token"] == "legacy-rt"
+    assert "root_folder_id" not in legacy_raw
+
+
+def test_disconnect_keeps_stored_credentials_for_all_accounts(_fake_keyring):
+    """Disconnecting one adapter must not delete any stored credentials."""
+    from backend.storage.credentials import (
+        has_google_drive_credentials,
+        load_google_drive_credentials,
+    )
+
+    _seed_credentials(refresh_token="legacy-rt")
+    _seed_scoped_credentials("acct-a", "rt-a")
+    _seed_scoped_credentials("acct-b", "rt-b")
+
+    adapter_a = _make_scoped_adapter("acct-a")
+    adapter_a._root_folder_id = "folder-a"
+    adapter_a.disconnect()
+
+    assert adapter_a._credentials_ref == "acct-a"
+    assert load_google_drive_credentials(credentials_ref="acct-a") is not None
+    assert load_google_drive_credentials(credentials_ref="acct-b") is not None
+    assert load_google_drive_credentials() is not None
+    assert has_google_drive_credentials(credentials_ref="acct-a") is True

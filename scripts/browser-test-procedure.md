@@ -1,5 +1,7 @@
 # SiloVault M1 — Manual Browser Test Procedure
 
+> **HISTORICAL PROCEDURE — written for the M1 checkpoint.** The steps still work as a smoke test of the LOCAL upload → list → download → delete path, but the **Known Limitations** section at the bottom is out of date: the Activity view is implemented (`GET /api/v1/activity`, paginated, with load-more) and Settings is a real view. Only the Sync Status view remains a placeholder, because inbox polling and the sync worker were never implemented. Treat this file as an M1-era script, not a description of the current UI.
+
 **Prerequisites:** Backend server running on `http://127.0.0.1:8000`  
 **Frontend URL:** `http://localhost:3000`
 

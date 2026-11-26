@@ -1,9 +1,10 @@
 """Pydantic schemas for requests and responses."""
 
+import copy
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FileMetadata(BaseModel):
@@ -142,6 +143,129 @@ class ActivityListResponse(BaseModel):
     offset: int
 
 
+# ---------------------------------------------------------------------------
+# Storage account schemas (HVSA H1.5.3)
+# ---------------------------------------------------------------------------
+
+# Same canonical provider pattern as backend.storage.registry and
+# backend.storage.account_manager, and the same width as the
+# storage_accounts.provider_id column.
+_PROVIDER_ID_PATTERN = r"^[A-Z][A-Z0-9_]*$"
+_PROVIDER_ID_MAX_LENGTH = 64
+_DISPLAY_NAME_MAX_LENGTH = 255
+
+
+def _normalize_display_name(value: Optional[str]) -> Optional[str]:
+    """Trim a display name and reject empty/whitespace-only values.
+
+    Mirrors ``AccountManager``, which stores names trimmed and never accepts
+    a blank one.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("display_name must be a non-empty string")
+    return stripped
+
+
+class StorageAccountCreate(BaseModel):
+    """Request body for creating a storage account.
+
+    ``credentials_ref`` is deliberately absent: references are generated
+    server-side, so a client can never select another account's keyring entry.
+    Unknown fields are rejected instead of ignored.
+    """
+
+    provider_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=_PROVIDER_ID_MAX_LENGTH,
+        pattern=_PROVIDER_ID_PATTERN,
+        description="Canonical provider identifier (e.g. 'LOCAL', 'GOOGLE_DRIVE')",
+    )
+    display_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=_DISPLAY_NAME_MAX_LENGTH,
+        description="User-defined account name (stored trimmed)",
+    )
+    configuration: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Provider-specific configuration (JSON object)",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_name(cls, value: str) -> str:
+        return _normalize_display_name(value)  # type: ignore[return-value]
+
+
+class StorageAccountUpdate(BaseModel):
+    """Request body for a partial storage-account update (PATCH).
+
+    Every field is optional; omitted fields are left unchanged.  ``provider_id``
+    and ``credentials_ref`` are intentionally not accepted: provider identity
+    cannot change through an update, and credential references stay
+    server-generated.  Unknown fields are rejected instead of ignored.
+    """
+
+    display_name: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=_DISPLAY_NAME_MAX_LENGTH,
+        description="New user-defined account name (stored trimmed)",
+    )
+    configuration: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Replacement provider configuration (JSON object)",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_name(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_display_name(value)
+
+
+class StorageAccountResponse(BaseModel):
+    """Storage account response.
+
+    Excludes ``credentials_ref`` and every credential/token field: account
+    responses are not a channel for keyring metadata.  ``configuration`` is
+    deep-copied on validation so callers cannot mutate ORM state.
+    """
+
+    id: str
+    provider_id: str
+    display_name: str
+    status: str
+    configuration: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("configuration")
+    @classmethod
+    def _defensive_copy(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        return copy.deepcopy(value)
+
+
+class StorageAccountListResponse(BaseModel):
+    """Storage account collection response.
+
+    Non-paginated: ``AccountManager.list_accounts`` returns every account, so
+    no ``limit``/``offset`` are advertised.
+    """
+
+    items: List[StorageAccountResponse]
+    total: int
+
+
 __all__: list[str] = [
     "FileMetadata",
     "FileListResponse",
@@ -152,4 +276,8 @@ __all__: list[str] = [
     "AiTaskListResponse",
     "ActivityRecordSchema",
     "ActivityListResponse",
+    "StorageAccountCreate",
+    "StorageAccountUpdate",
+    "StorageAccountResponse",
+    "StorageAccountListResponse",
 ]

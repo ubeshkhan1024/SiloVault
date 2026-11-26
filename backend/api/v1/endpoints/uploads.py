@@ -7,10 +7,16 @@ registers metadata in the SQLite database.
 import hashlib
 import logging
 import mimetypes
+from dataclasses import dataclass
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
+from backend.api.v1.endpoints.account_adapter_http import (
+    STORAGE_UNAVAILABLE_DETAIL,
+    resolve_adapter_or_http,
+)
 from backend.config import settings
 from backend.database import get_db
 from backend.models.unified_file import UnifiedFileRecord
@@ -28,6 +34,14 @@ from backend.storage.errors import (
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 
+@dataclass(frozen=True)
+class _UploadAdapterTarget:
+    """Request-shaped target for :func:`resolve_file_adapter`."""
+
+    provider: str
+    provider_account_id: Optional[str]
+
+
 def _detect_mime_type(filename: str, fallback: str = "application/octet-stream") -> str:
     """Safely detect MIME type from filename extension."""
     mime_type, _ = mimetypes.guess_type(filename)
@@ -38,6 +52,13 @@ def _detect_mime_type(filename: str, fallback: str = "application/octet-stream")
 async def create_upload(
     file: UploadFile = File(...),
     provider: str = Query("LOCAL", pattern="^[A-Z][A-Z0-9_]*$"),
+    account_id: Optional[str] = Query(
+        None,
+        description=(
+            "Optional managed storage account ID. Omit for a legacy "
+            "provider-level upload."
+        ),
+    ),
     db: Session = Depends(get_db),
 ) -> FileMetadata:
     """Upload a file to the specified storage provider and register its metadata.
@@ -53,6 +74,11 @@ async def create_upload(
     provider : str
         Storage provider identifier (e.g. "LOCAL", "GOOGLE_DRIVE").
         Defaults to "LOCAL". Must match canonical provider ID pattern.
+    account_id : str, optional
+        Managed storage account to upload through.  Omitted -> legacy
+        provider-level upload via the registry.  When supplied, the exact
+        account adapter is used, its provider must match ``provider``, and
+        the ID is stored on the created record.  Empty values are rejected.
 
     Security:
     - Never uses the client-provided filename as a filesystem path.
@@ -76,14 +102,34 @@ async def create_upload(
     original_name = file.filename or "unknown"
     logical_path = f"/{original_name}"
 
-    # Get adapter from registry and upload
-    try:
-        adapter, _ = lookup(provider)
-    except Exception as exc:
+    # Empty identifiers must not silently become legacy uploads.
+    if account_id is not None and not account_id.strip():
         raise HTTPException(
-            status_code=503,
-            detail=f"Storage provider unavailable: {exc}",
-        ) from exc
+            status_code=422,
+            detail="account_id must be a non-empty string.",
+        )
+
+    if account_id is None:
+        # Legacy provider-level upload: unchanged registry behavior.
+        try:
+            adapter, _ = lookup(provider)
+        except Exception as exc:
+            # Registry lookup failed: return the fixed public message so no
+            # internal resolution detail (account IDs, paths) is exposed.
+            raise HTTPException(
+                status_code=503,
+                detail=STORAGE_UNAVAILABLE_DETAIL,
+            ) from exc
+    else:
+        # Managed upload: exactly this account's adapter, with no fallback to
+        # the provider registry on any resolution failure.
+        adapter = resolve_adapter_or_http(
+            db,
+            _UploadAdapterTarget(
+                provider=provider,
+                provider_account_id=account_id,
+            ),
+        )
 
     try:
         provider_record = adapter.upload(content, original_name, logical_path)
@@ -94,14 +140,18 @@ async def create_upload(
     except StoragePermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except StorageUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Fixed public message: adapter details can contain internal account
+        # IDs, credential references and provider diagnostics.
+        raise HTTPException(
+            status_code=503, detail=STORAGE_UNAVAILABLE_DETAIL
+        ) from exc
     except StorageError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Register in database using provider_record fields
     record = UnifiedFileRecord(
         provider=provider,
-        provider_account_id=None,
+        provider_account_id=account_id,
         provider_file_id=provider_record.provider_file_id,
         name=provider_record.name,
         logical_path=provider_record.logical_path,
@@ -120,9 +170,9 @@ async def create_upload(
         # Use adapter quarantine/cleanup protocol to safely remove the uploaded file
         # Only LOCAL adapter implements quarantine/cleanup at this stage
         if provider == "LOCAL":
-            quarantine_id = None
+            # Use the SAME resolved adapter so a managed LOCAL account is
+            # cleaned up in its own root; never re-resolve through a registry.
             try:
-                adapter, _ = lookup("LOCAL")
                 quarantine_id = adapter.quarantine(provider_record.provider_file_id)
                 adapter.cleanup(quarantine_id)
             except Exception as cleanup_exc:

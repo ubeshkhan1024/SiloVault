@@ -6,11 +6,11 @@ error handling standards, and integration protocols for **SiloVault**.
 For overall architecture, see [ARCHITECTURE.md](ARCHITECTURE.md). For data movement, see [DATA_FLOW.md](DATA_FLOW.md). For security guidelines, see [SECURITY.md](SECURITY.md).
 
 > [!IMPORTANT]
-> **Implementation status (20 November 2026):** This document contains both implemented API behavior and target contracts. It is no longer accurate to describe the backend as a skeleton or all non-health endpoints as placeholders. Core local file operations, activity history, Google Drive connect/status/disconnect, rename, logical move, deletion/recovery paths, and the AI task/approval backend workflow have implementation and automated coverage. However, not every proposed API group is complete: full sync/intake, the end-user AI pipeline, approvals UI, and a complete user-facing restore workflow remain incomplete.
+> **Implementation status (26 November 2026):** This document contains both implemented API behavior and target contracts. It is no longer accurate to describe the backend as a skeleton or all non-health endpoints as placeholders. Core local file operations, activity history, Google Drive connect/status/disconnect, rename, logical move, deletion/recovery paths, and the AI task/approval backend workflow have implementation and automated coverage. However, not every proposed API group is complete: full sync/intake, the end-user AI pipeline, approvals UI, and a complete user-facing restore workflow remain incomplete.
 >
-> The latest full automated test run reported **722 passed, 3 skipped, 0 failed**. See `ARCHITECTURE.md` for provider-specific behavior and known endpoint limitations. In particular, the generic file DELETE endpoint must not be described as full Google Drive deletion support.
+> The latest full automated test run (26 November 2026, excluding the preserved duplicate module `tests/test_m52_vision_runtime_new.py`) reported **1792 passed, 3 skipped, 0 failed, 1 warning**. The warning is a Starlette/FastAPI deprecation for `HTTP_422_UNPROCESSABLE_ENTITY` (replacement: `HTTP_422_UNPROCESSABLE_CONTENT`). The HVSA H1.5.3 storage-account management API (list, detail, create, partial update) is implemented; see §2.8. Account-scoped file operations (download, rename, logical move, delete/quarantine, recovery and upload) are implemented; see §2.9. See `ARCHITECTURE.md` for provider-specific behavior and known endpoint limitations. In particular, the generic file DELETE endpoint must not be described as full Google Drive deletion support.
 >
-> **Contract rule:** Examples and schemas below that are not explicitly marked implemented remain target specifications, not guarantees about current runtime responses. Verify endpoint behavior against the implementation and tests before relying on a contract.
+> **Contract rule:** Examples and schemas below that are not explicitly marked implemented remain target specifications, not guarantees about current runtime responses. Sections 2.8 and 2.9 are implemented and covered by automated tests. Verify endpoint behavior against the implementation and tests before relying on a contract.
 ---
 
 ## 1. API Design Principles
@@ -120,6 +120,56 @@ The primary local backend on the Windows laptop exposes local management endpoin
 * **`GET /api/v1/providers`** — List registered cloud storage providers, connection states, and declared capabilities.
 * **`POST /api/v1/providers/{provider_type}/connect`** — Initiate secure local OAuth exchange (Google Drive, OneDrive, Dropbox, Box) or secure master key/credential exchange (MEGA).
 * **`DELETE /api/v1/providers/{account_id}`** — Disconnect account and revoke active session.
+
+### 2.8 Storage Account Management (Implemented — HVSA H1.5.3)
+
+Base path: `/api/v1/storage-accounts`. Every response below excludes `credentials_ref`, tokens, and all other credential material. Status values are `pending`, `connected`, `disconnected`, and `error`; CRUD behavior does not depend on status.
+
+* **`GET /api/v1/storage-accounts`** — List accounts. Optional `provider_id` query parameter is validated with the canonical provider rule (`400` if invalid); a valid provider with no matches returns `{"items": [], "total": 0}`. Response: `{"items": [StorageAccountResponse], "total": number}` (not paginated).
+* **`GET /api/v1/storage-accounts/{account_id}`** — Return one account (`200`) or `404` when it does not exist.
+* **`POST /api/v1/storage-accounts`** — Create an account (`201`).
+  ```json
+  {
+    "provider_id": "GOOGLE_DRIVE",
+    "display_name": "Work Drive",
+    "configuration": {"folder_id": "optional-provider-value"}
+  }
+  ```
+  `provider_id` must match `^[A-Z][A-Z0-9_]*$`; `display_name` is stored trimmed. `configuration` defaults to `{}` and must contain only JSON-serializable values (`NaN`/`Infinity` are rejected). Unknown fields, including `credentials_ref`, are rejected with `422`. The server generates `credentials_ref = storage-account:<uuid4>`; the new account starts `pending` with no credentials loaded and no adapter installed. A reference collision returns `409`.
+* **`PATCH /api/v1/storage-accounts/{account_id}`** — Partially update `display_name` and/or `configuration` (`200`). Omitted fields are unchanged, `null` leaves the existing value unchanged, and an empty body is a no-op. `configuration` replaces the stored document rather than merging. `provider_id` and `credentials_ref` are rejected with `422`. Unknown account: `404`. Invalid name or non-finite configuration: `422`. Cache invalidation is scoped to the updated account and happens only when a LOCAL account's `storage_root` changes.
+* **`StorageAccountResponse`**: `id`, `provider_id`, `display_name`, `status`, `configuration`, `created_at`, `updated_at`.
+
+Not implemented: an account `DELETE` endpoint and an account-management UI. Account-scoped file routing is implemented (HVSA H1.5.4); see §2.9. Account-scoped Google Drive OAuth is implemented under `/api/v1/storage-accounts/{account_id}/google-drive/connect|status|disconnect`.
+
+### 2.9 Account-Scoped File Operations (Implemented — HVSA H1.5.4)
+
+File records carry an optional `provider_account_id`. Every file operation resolves its adapter through one helper, `backend/storage/file_account_resolution.py:resolve_file_adapter()`:
+
+- **Legacy record (`provider_account_id` is `NULL`):** dispatches through the provider registry (`lookup(record.provider)`), exactly as before H1.5.4.
+- **Managed record (`provider_account_id` is set):** resolves exactly that `StorageAccount`. The account must exist and its `provider_id` must equal the record's `provider`.
+
+There is **no fallback**: a managed-account failure never resolves through the provider registry, so a request can never silently read, rename, move, delete or restore a file through a different account or the legacy provider adapter.
+
+Account-resolution errors map to these responses. Every message below is fixed: no account ID, credential reference, token, filesystem path or chained exception text is ever written into a response body. A `StorageUnavailableError` — whether raised during account resolution, by an adapter operation, or by a legacy registry lookup — is always answered with the single message `Storage provider is temporarily unavailable.`; the exception text is kept server-side (logs and the chained `__cause__`) for diagnostics.
+
+| Condition | HTTP | `detail` |
+|---|---|---|
+| The file's storage account does not exist | `404` | `The storage account for this file was not found.` |
+| The account belongs to a different provider than the file | `409` | `The storage account does not match this file's storage provider.` |
+| The account is disconnected, has no usable credentials, or fails authentication | `503` | `The storage account for this file is not available.` |
+| Credential store unavailable, or the provider is not registered (legacy record) | `503` | `Storage provider is temporarily unavailable.` |
+
+* **`GET /api/v1/files/{file_id}/download`** — resolves the record's adapter as above. No new query parameters.
+* **`PATCH /api/v1/files/{file_id}/rename`** — same resolution. LOCAL renames are metadata-only; Google Drive renames change the Drive filename.
+* **`PATCH /api/v1/files/{file_id}/move`** — same resolution. LOCAL and Google Drive moves are **logical only**: `logical_path` changes in SiloVault, the physical file location and the Drive parent folder do not.
+* **`DELETE /api/v1/files/{file_id}`** — same resolution; the same adapter instance performs quarantine, rollback restoration and cleanup. The durable `PendingDeletion` row stores the record's `provider_account_id` (`NULL` for legacy records) so recovery resolves the same account.
+* **`POST /api/v1/uploads`** — accepts an optional `account_id` query parameter in addition to `provider` (default `LOCAL`).
+  - Omitted: legacy provider-level upload through the registry; the record's `provider_account_id` stays `NULL`.
+  - Supplied: uploads through that exact managed account, requires the account's provider to match `provider`, and persists `account_id` as the new record's `provider_account_id`. Empty or whitespace-only values return `422`; an unknown account returns `404`, a provider mismatch `409`, and a disconnected/unavailable account `503`. The `LOCAL` DB-failure compensation (quarantine + cleanup) uses the same resolved adapter, so a managed LOCAL upload is cleaned up in that account's own storage root.
+  - Cloud uploads have **no** compensating delete: if the provider upload succeeds and the database commit fails, the provider file can be orphaned (known limitation, unchanged by H1.5.4).
+* **Recovery** — the background `RecoveryService` resolves each `PendingDeletion` through the same helper. Any resolution failure schedules a transient retry and keeps the row; it is never treated as a successful cleanup or a missing file.
+
+No account-count limit is imposed by the application: accounts are addressed individually, with no maximum, quota or default-account selection. `GET /api/v1/files` still lists all records; there is no `account_id` filter.
 
 ---
 

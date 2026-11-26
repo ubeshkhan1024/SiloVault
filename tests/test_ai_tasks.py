@@ -32,8 +32,8 @@ from backend.models.unified_file import UnifiedFileRecord
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
-# Expected head revision after the AI tasks migration is applied.
-EXPECTED_AI_HEAD = "20261119221300"
+# Current Alembic head (updated by each new migration).
+EXPECTED_AI_HEAD = "b7c4e1a92f30"
 
 # Columns the model declares on ai_tasks.
 EXPECTED_AI_COLUMNS = {
